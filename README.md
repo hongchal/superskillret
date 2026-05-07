@@ -1,8 +1,27 @@
 # superskillret
 
-Embedding-based **skill retrieval plugin for Claude Code**. On every user prompt, it picks the top-K most relevant skills from a pool of ~16,800 public skills and injects them as context — so Claude gets the right "how to" reference without you having to preload every skill in the system prompt.
+> Embedding-based **skill retrieval plugin for Claude Code**. On every user prompt, it silently picks the top-K most relevant skills from a pool of 16,783 public skills and injects them as context — so Claude gets the right "how to" reference without you preloading every skill in the system prompt.
 
-Uses [`ThakiCloud/SkillRet-Embedding-0.6B`](https://huggingface.co/ThakiCloud/SkillRet-Embedding-0.6B) (fine-tuned from Qwen3-Embedding-0.6B) and the [`ThakiCloud/SKILLRET`](https://huggingface.co/datasets/ThakiCloud/SKILLRET) skill corpus.
+## Quickstart
+
+In a Claude Code session:
+
+```
+/plugin marketplace add lotusroot-kim/superskillret
+/plugin install superskillret@lotusroot-kim
+```
+
+Then, one-time, from the plugin directory (Claude Code shows you where it was cloned — usually under `~/.claude/plugins/cache/`):
+
+```bash
+bash scripts/install.sh
+```
+
+That's it. On your next user prompt, a local retrieval daemon lazy-starts, loads the embedding model + index once, and from then on every prompt you send gets the top-K relevant skills injected as additional context. Slash commands `/superskillret:status` and `/superskillret:stop` are available for inspection.
+
+---
+
+Built on [`ThakiCloud/SkillRet-Embedding-0.6B`](https://huggingface.co/ThakiCloud/SkillRet-Embedding-0.6B) (fine-tuned from Qwen3-Embedding-0.6B) and the [`ThakiCloud/SKILLRET`](https://huggingface.co/datasets/ThakiCloud/SKILLRET) 16,783-skill corpus. Prebuilt embedding index at [`youngryankim/superskillret-index`](https://huggingface.co/datasets/youngryankim/superskillret-index).
 
 ## What it does
 
@@ -13,20 +32,9 @@ Uses [`ThakiCloud/SkillRet-Embedding-0.6B`](https://huggingface.co/ThakiCloud/Sk
 
 The daemon is lazy-started on the first request and then stays warm. Model + index are loaded **once** per process.
 
-## Install
+## What `install.sh` does
 
-```
-/plugin marketplace add lotusroot-kim/superskillret
-/plugin install superskillret@lotusroot-kim
-```
-
-Then, from the plugin directory (Claude Code tells you where it cloned the plugin — usually under `~/.claude/plugins/cache/`), run the one-time setup:
-
-```bash
-bash scripts/install.sh
-```
-
-This will:
+The one-time `bash scripts/install.sh` step:
 - create `.venv/` (CPU torch wheel by default)
 - install `sentence-transformers`, `datasets`, `numpy`, `huggingface_hub`
 - download the embedding model (~1.2 GB) via Hugging Face cache
@@ -47,26 +55,9 @@ Set `SUPERSKILLRET_SKIP_PREBUILT=1` to force a local build.
 
 Daemon auto-detects GPU (`SUPERSKILLRET_DEVICE=auto`). Override with `SUPERSKILLRET_DEVICE=cpu` or `cuda`.
 
-## Register with Claude Code
+## Alternative: direct hook in `settings.json` (no marketplace)
 
-### Recommended: marketplace install
-
-```
-/plugin marketplace add lotusroot-kim/superskillret
-/plugin install superskillret@lotusroot-kim
-```
-
-Then, in the plugin's working directory (wherever Claude Code cloned it — typically `~/.claude/plugins/cache/superskillret@lotusroot-kim/`), run the first-time setup once:
-
-```bash
-bash scripts/install.sh
-```
-
-After that, every Claude Code session will lazy-start the retrieval daemon on the first prompt.
-
-### Alternative: direct hook in settings.json (no marketplace)
-
-Clone the repo somewhere and add to your `~/.claude/settings.json`:
+If you don't want to go through the Claude Code plugin marketplace, clone this repo somewhere, run `bash scripts/install.sh`, and add to your `~/.claude/settings.json`:
 
 ```json
 {
