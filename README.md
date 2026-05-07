@@ -101,7 +101,7 @@ These two control the **quality / token-cost tradeoff**. Every prompt you send g
 | Variable | Default | Meaning |
 |---|---|---|
 | `SUPERSKILLRET_TOP_K` | **`3`** | How many skills to inject per prompt. Higher = more context, more tokens, more cost. |
-| `SUPERSKILLRET_MIN_SCORE` | **`0.40`** | Drop hits below this cosine score. Higher = stricter (fewer, more relevant hits — sometimes zero). Lower = noisier. |
+| `SUPERSKILLRET_MIN_SCORE` | **`0.30`** | Drop hits below this cosine score. Higher = stricter (fewer, more relevant hits — sometimes zero). Lower = noisier. |
 
 **Token-cost calibration** (measured against this session, ~42 KB average additional context at `TOP_K=5 / MIN_SCORE=0.25`):
 

@@ -13,7 +13,7 @@ warm path is dominated by socket round-trip + python startup.
 Environment variables:
   SUPERSKILLRET_SOCKET      default /tmp/superskillret.sock
   SUPERSKILLRET_TOP_K       default 3   (how many skills to inject)
-  SUPERSKILLRET_MIN_SCORE   default 0.40 (drop hits below this cosine score)
+  SUPERSKILLRET_MIN_SCORE   default 0.30 (drop hits below this cosine score)
   SUPERSKILLRET_PYTHON      python used to spawn daemon (default current)
   SUPERSKILLRET_SPAWN_WAIT  seconds to wait for lazy daemon boot (default 90)
   SUPERSKILLRET_DISABLE     if "1", hook returns empty context
@@ -32,7 +32,7 @@ DAEMON_SCRIPT = ROOT / "scripts" / "daemon.py"
 
 SOCKET_PATH = os.environ.get("SUPERSKILLRET_SOCKET", "/tmp/superskillret.sock")
 TOP_K = int(os.environ.get("SUPERSKILLRET_TOP_K", "3"))
-MIN_SCORE = float(os.environ.get("SUPERSKILLRET_MIN_SCORE", "0.40"))
+MIN_SCORE = float(os.environ.get("SUPERSKILLRET_MIN_SCORE", "0.30"))
 PYTHON = os.environ.get("SUPERSKILLRET_PYTHON", sys.executable)
 SPAWN_WAIT = float(os.environ.get("SUPERSKILLRET_SPAWN_WAIT", "180"))
 DISABLED = os.environ.get("SUPERSKILLRET_DISABLE") == "1"
