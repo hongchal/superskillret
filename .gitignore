@@ -15,6 +15,12 @@ cache/*.jsonl
 !cache/VERSION
 !cache/README.md
 
+# ONNX encoder — fetched from
+# https://huggingface.co/youngryankim/superskillret-onnx-int8
+# Also too big for git.
+onnx_model/
+onnx_model_int8/
+
 # Python / editor junk
 __pycache__/
 *.pyc

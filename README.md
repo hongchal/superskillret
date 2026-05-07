@@ -21,7 +21,7 @@ That's it. On your next user prompt, a local retrieval daemon lazy-starts, loads
 
 ---
 
-Built on [`ThakiCloud/SkillRet-Embedding-0.6B`](https://huggingface.co/ThakiCloud/SkillRet-Embedding-0.6B) (fine-tuned from Qwen3-Embedding-0.6B) and the [`ThakiCloud/SKILLRET`](https://huggingface.co/datasets/ThakiCloud/SKILLRET) 16,783-skill corpus. Prebuilt embedding index at [`youngryankim/superskillret-index`](https://huggingface.co/datasets/youngryankim/superskillret-index).
+Built on [`ThakiCloud/SkillRet-Embedding-0.6B`](https://huggingface.co/ThakiCloud/SkillRet-Embedding-0.6B) (fine-tuned from Qwen3-Embedding-0.6B) and the [`ThakiCloud/SKILLRET`](https://huggingface.co/datasets/ThakiCloud/SKILLRET) 16,783-skill corpus. Ships with an INT8-quantized ONNX encoder ([`youngryankim/superskillret-onnx-int8`](https://huggingface.co/youngryankim/superskillret-onnx-int8), 598 MB) plus a prebuilt embedding index ([`youngryankim/superskillret-index`](https://huggingface.co/datasets/youngryankim/superskillret-index)) for ~0.07 s CPU retrieval.
 
 ## What it does
 
@@ -101,6 +101,9 @@ Environment variables (set in shell, hook command, or `settings.json` `env`):
 | `SUPERSKILLRET_TOP_K` | `3` | how many skills to return |
 | `SUPERSKILLRET_MIN_SCORE` | `0.25` | drop hits below this cosine score |
 | `SUPERSKILLRET_DEVICE` | `cpu` | `cpu`, `cuda`, or `auto` (auto prefers GPU when available) |
+| `SUPERSKILLRET_BACKEND` | `onnx` | `onnx` (INT8, ~0.07 s) or `pytorch` (~5 s, sentence-transformers). ONNX falls back to PyTorch automatically if the model files are missing. |
+| `SUPERSKILLRET_ONNX_DIR` | `${CLAUDE_PLUGIN_ROOT}/onnx_model_int8` | directory containing `model.onnx` + tokenizer files |
+| `SUPERSKILLRET_ONNX_REPO` | `youngryankim/superskillret-onnx-int8` | HF Hub repo `install.sh` downloads the ONNX encoder from |
 | `SUPERSKILLRET_SOCKET` | `/tmp/superskillret.sock` | daemon socket |
 | `SUPERSKILLRET_PIDFILE` | `/tmp/superskillret.pid` | daemon pid file |
 | `SUPERSKILLRET_LOG` | `/tmp/superskillret.log` | daemon log file |
@@ -110,29 +113,48 @@ Environment variables (set in shell, hook command, or `settings.json` `env`):
 
 ## Expected latency
 
-| Call | CPU | GPU |
-|---|---|---|
-| First prompt (cold, daemon boot + model load) | ~20–40 s | ~10–15 s |
-| Warm prompt | ~1–3 s | ~0.3–0.6 s |
+All numbers measured end-to-end from hook invocation (Python startup → socket round trip → daemon encode + similarity → emit JSON).
 
-Most of the warm cost is the hook's own Python startup; the daemon-side work is ~0.1s.
+### Default — CPU, ONNX INT8 backend
+
+| Call | Latency | Notes |
+|---|---|---|
+| First prompt (cold; daemon boot + ONNX load) | ~15–30 s | one-time per Claude Code session |
+| Warm prompt | **~0.3 s** | hook 0.1 s + daemon 0.2 s |
+
+### PyTorch backend (`SUPERSKILLRET_BACKEND=pytorch`)
+
+| Call | CPU | GPU (`SUPERSKILLRET_DEVICE=cuda`) |
+|---|---|---|
+| Cold | ~60–120 s | ~15–30 s |
+| Warm | ~5–7 s | ~0.3–0.6 s |
+
+The ONNX INT8 default is ~20× faster than the PyTorch CPU path and 4× smaller on disk (598 MB vs 2.4 GB). Retrieval quality versus FP32: top-1 skill identical, top-5 overlap ~80% (same topic, minor reshuffles between near-duplicate skills in the corpus).
 
 ## Files
 
 ```
 superskillret/
-├── .claude-plugin/plugin.json     # plugin manifest
+├── .claude-plugin/
+│   ├── plugin.json                # plugin manifest
+│   └── marketplace.json           # self-hosted marketplace entry
 ├── hooks/hooks.json               # UserPromptSubmit hook registration
 ├── commands/
 │   ├── status.md                  # /superskillret:status
 │   └── stop.md                    # /superskillret:stop
 ├── scripts/
-│   ├── install.sh                 # one-shot setup (venv, data, index)
-│   ├── build_index.py             # (re)build the embedding index
+│   ├── install.sh                 # one-shot setup (venv, onnx, index)
+│   ├── build_index.py             # (re)build the embedding index from skill pool
+│   ├── quantize_onnx.py           # INT8-quantize a fresh ONNX export
+│   ├── publish_index.py           # upload index cache to HF dataset
 │   ├── daemon.py                  # long-running retrieval server
-│   ├── retrieve.py                # UserPromptSubmit hook (thin client)
+│   ├── retrieve.py                # UserPromptSubmit hook (thin socket client)
+│   ├── compare_backends.py        # PyTorch vs ONNX FP32 vs INT8 parity bench
 │   └── smoke_test.py              # sanity test for retrieval quality
-├── skill_pool/skills.jsonl        # 16,783 skills (built by install.sh)
+├── onnx_model_int8/               # INT8 encoder (downloaded by install.sh)
+│   ├── model.onnx                 # 598 MB
+│   └── tokenizer files
+├── skill_pool/skills.jsonl        # 16,783 skills (downloaded only on fallback build)
 └── cache/
     ├── skill_embeddings.npy       # normalized embeddings, float16
     └── skill_metadata.jsonl       # one JSON record per embedding

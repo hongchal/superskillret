@@ -23,6 +23,7 @@ PY="$VENV/bin/python"
 PIP="$VENV/bin/pip"
 
 INDEX_REPO="${SUPERSKILLRET_INDEX_REPO:-youngryankim/superskillret-index}"
+ONNX_REPO="${SUPERSKILLRET_ONNX_REPO:-youngryankim/superskillret-onnx-int8}"
 
 log() { printf '[superskillret] %s\n' "$*"; }
 
@@ -56,10 +57,40 @@ else
   log "torch already installed"
 fi
 
-log "installing sentence-transformers, datasets, numpy, huggingface_hub"
-"$PIP" install --quiet "sentence-transformers>=3.0" "datasets>=3.0" "numpy>=1.26" "huggingface_hub>=0.24"
+log "installing deps: sentence-transformers, onnxruntime, transformers, datasets, numpy, huggingface_hub"
+"$PIP" install --quiet \
+    "sentence-transformers>=3.0" \
+    "onnxruntime>=1.17" \
+    "transformers>=4.40" \
+    "datasets>=3.0" \
+    "numpy>=1.26" \
+    "huggingface_hub>=0.24"
 
-# 4. embedding index — try prebuilt first, fall back to local build
+# 4. ONNX INT8 encoder (default backend; small/fast)
+ONNX_DIR="$ROOT/onnx_model_int8"
+if [ ! -s "$ONNX_DIR/model.onnx" ] || [ "${FORCE:-0}" = "1" ]; then
+  log "fetching ONNX INT8 encoder from $ONNX_REPO (~598 MB, ~5-30s)"
+  mkdir -p "$ONNX_DIR"
+  ROOT="$ROOT" REPO="$ONNX_REPO" ONNX_DIR="$ONNX_DIR" "$PY" - <<'PYEOF'
+import os, sys
+from huggingface_hub import snapshot_download
+try:
+    snapshot_download(
+        repo_id=os.environ["REPO"],
+        repo_type="model",
+        local_dir=os.environ["ONNX_DIR"],
+    )
+    print("[superskillret] ONNX encoder downloaded")
+except Exception as e:
+    print(f"[superskillret] ONNX fetch failed: {type(e).__name__}: {e}", file=sys.stderr)
+    print("[superskillret] the daemon will fall back to the PyTorch backend", file=sys.stderr)
+    sys.exit(0)  # non-fatal; daemon falls back to pytorch
+PYEOF
+else
+  log "ONNX encoder already present at $ONNX_DIR"
+fi
+
+# 5. embedding index — try prebuilt first, fall back to local build
 EMB="$ROOT/cache/skill_embeddings.npy"
 META="$ROOT/cache/skill_metadata.jsonl"
 VER="$ROOT/cache/VERSION"

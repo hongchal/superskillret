@@ -12,6 +12,10 @@ Environment variables:
   SUPERSKILLRET_SOCKET    default /tmp/superskillret.sock
   SUPERSKILLRET_DEVICE    default cpu. Set to "cuda" to use GPU, or
                           "auto" to prefer GPU when available.
+  SUPERSKILLRET_BACKEND   default "onnx" (ONNX INT8, ~0.07s CPU). Set to
+                          "pytorch" for the sentence-transformers path.
+  SUPERSKILLRET_ONNX_DIR  default <plugin>/onnx_model_int8. Directory
+                          containing model.onnx + tokenizer files.
   SUPERSKILLRET_MODEL     default ThakiCloud/SkillRet-Embedding-0.6B
   SUPERSKILLRET_PIDFILE   default /tmp/superskillret.pid
   SUPERSKILLRET_LOG       default /tmp/superskillret.log
@@ -38,6 +42,11 @@ PID_PATH = os.environ.get("SUPERSKILLRET_PIDFILE", "/tmp/superskillret.pid")
 LOG_PATH = os.environ.get("SUPERSKILLRET_LOG", "/tmp/superskillret.log")
 MODEL_NAME = os.environ.get("SUPERSKILLRET_MODEL", "ThakiCloud/SkillRet-Embedding-0.6B")
 DEVICE_ENV = os.environ.get("SUPERSKILLRET_DEVICE", "cpu")
+BACKEND = os.environ.get("SUPERSKILLRET_BACKEND", "onnx").lower()  # "onnx" | "pytorch"
+ONNX_DIR = Path(os.environ.get(
+    "SUPERSKILLRET_ONNX_DIR",
+    str(ROOT / "onnx_model_int8"),
+))
 
 QUERY_PROMPT = (
     "Instruct: Given a skill search query, retrieve relevant skills that match the query\n"
@@ -63,14 +72,77 @@ def pick_device() -> str:
         return "cpu"
 
 
-def load_model(device: str):
-    from sentence_transformers import SentenceTransformer
+def _normalize(x: np.ndarray) -> np.ndarray:
+    return x / (np.linalg.norm(x, axis=-1, keepdims=True) + 1e-12)
 
-    logging.info("loading model %s on %s", MODEL_NAME, device)
-    t0 = time.time()
-    model = SentenceTransformer(MODEL_NAME, trust_remote_code=True, device=device)
-    logging.info("model loaded in %.1fs", time.time() - t0)
-    return model
+
+def _last_token_pool(token_embeddings: np.ndarray, attention_mask: np.ndarray) -> np.ndarray:
+    seq_lengths = attention_mask.sum(axis=1) - 1
+    batch = token_embeddings.shape[0]
+    return token_embeddings[np.arange(batch), seq_lengths]
+
+
+class PyTorchEncoder:
+    def __init__(self, device: str):
+        from sentence_transformers import SentenceTransformer
+
+        logging.info("loading PyTorch model %s on %s", MODEL_NAME, device)
+        t0 = time.time()
+        self.model = SentenceTransformer(MODEL_NAME, trust_remote_code=True, device=device)
+        logging.info("model loaded in %.1fs", time.time() - t0)
+
+    def encode(self, text: str) -> np.ndarray:
+        emb = self.model.encode(
+            [text],
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+        )[0]
+        return emb.astype(np.float32)
+
+
+class ONNXEncoder:
+    def __init__(self, onnx_dir: Path):
+        from onnxruntime import InferenceSession, SessionOptions
+        from transformers import AutoTokenizer
+
+        onnx_path = onnx_dir / "model.onnx"
+        if not onnx_path.exists():
+            raise FileNotFoundError(
+                f"ONNX model not found at {onnx_path}. Either point "
+                f"SUPERSKILLRET_ONNX_DIR at the right directory or run "
+                f"scripts/install.sh to download/build it."
+            )
+        logging.info("loading ONNX model from %s", onnx_dir)
+        t0 = time.time()
+        sess_opts = SessionOptions()
+        sess_opts.intra_op_num_threads = max(1, (os.cpu_count() or 4) // 2)
+        self.session = InferenceSession(
+            str(onnx_path),
+            sess_options=sess_opts,
+            providers=["CPUExecutionProvider"],
+        )
+        self.tokenizer = AutoTokenizer.from_pretrained(str(onnx_dir), trust_remote_code=True)
+        self._input_names = {i.name for i in self.session.get_inputs()}
+        logging.info("ONNX model loaded in %.1fs", time.time() - t0)
+
+    def encode(self, text: str) -> np.ndarray:
+        enc = self.tokenizer(text, return_tensors="np", padding=True, truncation=True, max_length=8192)
+        inputs = {k: v for k, v in enc.items() if k in self._input_names}
+        outputs = self.session.run(None, inputs)
+        token_embeds = outputs[0]
+        attn = enc.get("attention_mask", np.ones(token_embeds.shape[:2], dtype=np.int64))
+        pooled = _last_token_pool(token_embeds, attn)
+        return _normalize(pooled)[0].astype(np.float32)
+
+
+def make_encoder(device: str):
+    if BACKEND == "onnx":
+        try:
+            return ONNXEncoder(ONNX_DIR)
+        except Exception as e:
+            logging.warning("ONNX encoder failed (%s); falling back to PyTorch", e)
+            return PyTorchEncoder(device)
+    return PyTorchEncoder(device)
 
 
 def load_index():
@@ -87,18 +159,14 @@ def load_index():
 class RetrievalServer:
     def __init__(self):
         self.device = pick_device()
-        self.model = load_model(self.device)
+        self.encoder = make_encoder(self.device)
         self.embeddings, self.metadata = load_index()
         self._lock = threading.Lock()
 
     def search(self, query: str, top_k: int, min_score: float):
         t0 = time.time()
         with self._lock:
-            q_emb = self.model.encode(
-                [QUERY_PROMPT + query],
-                normalize_embeddings=True,
-                convert_to_numpy=True,
-            )[0].astype(np.float32)
+            q_emb = self.encoder.encode(QUERY_PROMPT + query)
         sims = self.embeddings @ q_emb
         top_idx = np.argpartition(-sims, min(top_k, len(sims) - 1))[:top_k]
         top_idx = top_idx[np.argsort(-sims[top_idx])]
