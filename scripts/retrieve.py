@@ -31,7 +31,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DAEMON_SCRIPT = ROOT / "scripts" / "daemon.py"
 
 SOCKET_PATH = os.environ.get("SUPERSKILLRET_SOCKET", "/tmp/superskillret.sock")
-TOP_K = int(os.environ.get("SUPERSKILLRET_TOP_K", "3"))
+TOP_K = int(os.environ.get("SUPERSKILLRET_TOP_K", "5"))
 MIN_SCORE = float(os.environ.get("SUPERSKILLRET_MIN_SCORE", "0.25"))
 PYTHON = os.environ.get("SUPERSKILLRET_PYTHON", sys.executable)
 SPAWN_WAIT = float(os.environ.get("SUPERSKILLRET_SPAWN_WAIT", "90"))
@@ -98,7 +98,22 @@ def query_daemon(prompt: str, top_k: int, min_score: float) -> dict:
 def format_context(hits: list) -> str:
     if not hits:
         return ""
-    lines = ["# Relevant skills retrieved by superskillret", ""]
+    summary = ", ".join(
+        f"`{h.get('name','?')}` ({h.get('score',0):.2f})" for h in hits
+    )
+    lines = [
+        f"**superskillret retrieved top-{len(hits)}:** {summary}",
+        "",
+        "Before answering, begin your response with a one-line notice:",
+        f"> _superskillret: using {summary}_",
+        "",
+        "Then use the skills below as authoritative reference material for the user's request.",
+        "",
+        "---",
+        "",
+        "# Relevant skills retrieved by superskillret",
+        "",
+    ]
     for i, h in enumerate(hits, 1):
         score = h.get("score", 0.0)
         lines.append(f"## {i}. {h.get('name','?')}  (score={score:.3f})")
@@ -159,8 +174,19 @@ def main():
 
     hits = result.get("hits", [])
     context = format_context(hits)
+    latency = result.get("latency_s", 0)
     if context:
-        context += f"\n<!-- superskillret: {len(hits)} hit(s), {result.get('latency_s', 0):.2f}s -->\n"
+        context += f"\n<!-- superskillret: {len(hits)} hit(s), {latency:.2f}s -->\n"
+
+    if hits:
+        summary = " | ".join(f"{h.get('name','?')} ({h.get('score',0):.2f})" for h in hits)
+        sys.stderr.write(
+            f"superskillret: retrieved top-{len(hits)} in {latency:.2f}s → {summary}\n"
+        )
+    else:
+        sys.stderr.write(
+            f"superskillret: no hits above min_score={MIN_SCORE}\n"
+        )
     emit(context)
 
 
