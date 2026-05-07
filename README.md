@@ -227,7 +227,7 @@ MVP is complete and verified end-to-end on CPU with the ONNX INT8 backend. Retri
 ### Known limitations today
 
 - **CPU warm latency is 7–9 s.** Most of it is the PyTorch forward pass for a 0.6B-parameter model. Usable, but not great for chatty sessions.
-- **Daemon holds ~1.5 GB RAM** once started. There is no idle timeout; the process only exits when you run `/superskillret:stop` or kill it.
+- **Daemon holds ~1.4 GB RAM** once started (ONNX INT8 encoder + INT8 embedding index). No idle timeout; the process only exits when you run `/superskillret:stop` or kill it. PyTorch-backend sessions take more (~2.4 GB).
 - **Prebuilt index lives at [`youngryankim/superskillret-index`](https://huggingface.co/datasets/youngryankim/superskillret-index).** Users get the fast (~5 s) install path when the dataset is accessible. If the dataset is offline, `install.sh` falls back to rebuilding locally (30–60 min on CPU).
 - **Not published as a Claude Code marketplace plugin.** No `/plugin install superskillret@...` path exists — only the manual `settings.json` hook wiring described above.
 - **Not tested against a live Claude Code session end-to-end.** The hook and daemon were verified by feeding synthetic `UserPromptSubmit` payloads; the real CLI hookup was not exercised.
