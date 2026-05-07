@@ -1,0 +1,13 @@
+{
+  "name": "superskillret",
+  "version": "0.1.0",
+  "description": "Embedding-based skill retrieval for Claude Code. On every user prompt, picks the top-K relevant skills from a 16,783-skill pool and injects them as context.",
+  "author": {
+    "name": "lotusroot-kim",
+    "url": "https://github.com/lotusroot-kim"
+  },
+  "license": "MIT",
+  "keywords": ["retrieval", "skills", "embedding", "rag", "hook"],
+  "repository": "https://github.com/lotusroot-kim/superskillret",
+  "homepage": "https://github.com/lotusroot-kim/superskillret"
+}
