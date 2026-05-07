@@ -35,26 +35,17 @@ The daemon is lazy-started on the first request and then stays warm. Model + ind
 ## What `install.sh` does
 
 The one-time `bash scripts/install.sh` step:
-- create `.venv/` (CPU torch wheel by default)
+- create `.venv/` (CPU torch wheel)
 - install `sentence-transformers`, `datasets`, `numpy`, `huggingface_hub`
 - download the embedding model (~1.2 GB) via Hugging Face cache
 - **fetch the prebuilt index** (~194 MB) from [`youngryankim/superskillret-index`](https://huggingface.co/datasets/youngryankim/superskillret-index) — takes ~5 s on a decent connection
-- fall back to building the index locally only if the prebuilt dataset is unreachable (offline, deleted). Local build time: **~1 min on GPU**, **~30–60 min on CPU** — and requires the 300 MB skill pool download.
+- fall back to building the index locally only if the prebuilt dataset is unreachable (offline, deleted). Local build time: **~30–60 min on CPU** — and requires the 300 MB skill pool download.
 
 Set `FORCE=1` to rebuild/refetch everything from scratch.
 Set `SUPERSKILLRET_INDEX_REPO=<user>/<repo>` to point at a different prebuilt-index dataset.
 Set `SUPERSKILLRET_SKIP_PREBUILT=1` to force a local build.
 
-### GPU users
-
-By design, **superskillret runs on CPU by default** — a single 0.6B-parameter forward pass per prompt (1–3 s on a modern laptop) fits well inside Claude's own answer-generation latency and keeps your GPU free for other work. `install.sh` installs the CPU torch wheel to match.
-
-If you want GPU anyway (~0.1 s per prompt, ~3 GB VRAM resident), reinstall torch with CUDA and set the env var:
-
-```bash
-.venv/bin/pip install --force-reinstall torch --index-url https://download.pytorch.org/whl/cu121
-export SUPERSKILLRET_DEVICE=cuda   # or "auto" to prefer GPU when available, else CPU
-```
+superskillret is **CPU-only**. A single 0.6B-parameter forward pass per prompt (~0.3 s with the ONNX INT8 encoder) fits well inside Claude's own answer-generation latency, so there's no GPU path to configure.
 
 ## Alternative: direct hook in `settings.json` (no marketplace)
 
@@ -83,7 +74,7 @@ This path skips the marketplace and slash commands, but the hook runs the same.
 
 ## Usage
 
-Nothing. Just talk to Claude. After the first prompt (~10s warm-up on CPU, ~3s on GPU), every prompt has top-K retrieved skills silently injected.
+Nothing. Just talk to Claude. After the first prompt (~15–30s cold warm-up to load the ONNX model), every prompt has top-K retrieved skills silently injected.
 
 Inspect / control the daemon via slash commands (available only with the marketplace install):
 
@@ -108,17 +99,17 @@ These two control the **quality / token-cost tradeoff**. Every prompt you send g
 | Setting | Injected tokens / prompt | Relative cost |
 |---|---|---|
 | `TOP_K=5`, `MIN_SCORE=0.25` | ~10,000 (median) | baseline |
-| **`TOP_K=3`, `MIN_SCORE=0.40`** (default) | **~5,000–6,000** | **~50 % off** — sweet spot |
+| **`TOP_K=3`, `MIN_SCORE=0.30`** (default) | **~5,000–7,000** | **~40–50 % off** — recall-leaning default |
+| `TOP_K=3`, `MIN_SCORE=0.40` | ~3,000–6,000 | ~60 % off — stricter, fewer but more relevant hits |
 | `TOP_K=1`, `MIN_SCORE=0.40` | ~1,500–2,500 | ~80 % off |
 | `TOP_K=3`, `MIN_SCORE=0.55` | 0–3,000 (many prompts get 0 hits) | aggressive — turns retrieval off for off-topic asks |
 
-`MIN_SCORE=0.40` is tuned so irrelevant prompts (small talk, meta-questions) skip the hook entirely and pay nothing, while real engineering questions still surface 1-3 on-topic skills.
+The default `MIN_SCORE=0.30` keeps most engineering prompts surfacing 2-3 skills. Small talk / meta-questions still often fall below the threshold and skip injection entirely. Bump to `0.40` or `0.45` if you want less context per prompt.
 
 ### Runtime settings
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `SUPERSKILLRET_DEVICE` | `cpu` | `cpu`, `cuda`, or `auto` (auto prefers GPU when available) |
 | `SUPERSKILLRET_BACKEND` | `onnx` | `onnx` (INT8, ~0.07 s) or `pytorch` (~5 s). ONNX falls back to PyTorch if model files are missing. |
 | `SUPERSKILLRET_ONNX_DIR` | `${CLAUDE_PLUGIN_ROOT}/onnx_model_int8` | directory containing `model.onnx` + tokenizer files |
 | `SUPERSKILLRET_ONNX_REPO` | `youngryankim/superskillret-onnx-int8` | HF Hub repo `install.sh` downloads the ONNX encoder from |
@@ -136,21 +127,21 @@ All variables can be set in your shell, in the hook `command`, or in `settings.j
 
 All numbers measured end-to-end from hook invocation (Python startup → socket round trip → daemon encode + similarity → emit JSON).
 
-### Default — CPU, ONNX INT8 backend
+### Default — ONNX INT8 backend
 
 | Call | Latency | Notes |
 |---|---|---|
 | First prompt (cold; daemon boot + ONNX load) | ~15–30 s | one-time per Claude Code session |
 | Warm prompt | **~0.3 s** | hook 0.1 s + daemon 0.2 s |
 
-### PyTorch backend (`SUPERSKILLRET_BACKEND=pytorch`)
+### PyTorch fallback (`SUPERSKILLRET_BACKEND=pytorch`)
 
-| Call | CPU | GPU (`SUPERSKILLRET_DEVICE=cuda`) |
-|---|---|---|
-| Cold | ~60–120 s | ~15–30 s |
-| Warm | ~5–7 s | ~0.3–0.6 s |
+| Call | Latency |
+|---|---|
+| Cold | ~60–120 s |
+| Warm | ~5–7 s |
 
-The ONNX INT8 default is ~20× faster than the PyTorch CPU path and 4× smaller on disk (598 MB vs 2.4 GB). Retrieval quality versus FP32: top-1 skill identical, top-5 overlap ~80% (same topic, minor reshuffles between near-duplicate skills in the corpus).
+The ONNX INT8 default is ~20× faster than the PyTorch path and 4× smaller on disk (598 MB vs 2.4 GB). Retrieval quality versus FP32: top-1 skill identical, top-5 overlap ~80% (same topic, minor reshuffles between near-duplicate skills in the corpus).
 
 ## Files
 
@@ -231,16 +222,15 @@ Model reported eval: NDCG@15 = 0.7887, Recall@10 = 0.8542.
 
 ## Status & roadmap
 
-MVP is complete and verified end-to-end (GPU and CPU). Retrieval works, daemon + socket client round-trip works, slash commands work. What remains is productionization.
+MVP is complete and verified end-to-end on CPU with the ONNX INT8 backend. Retrieval works, daemon + socket client round-trip works, slash commands work. What remains is productionization.
 
 ### Known limitations today
 
 - **CPU warm latency is 7–9 s.** Most of it is the PyTorch forward pass for a 0.6B-parameter model. Usable, but not great for chatty sessions.
-- **Daemon holds 1.5 GB VRAM (GPU) or 2.4 GB RAM (CPU) forever** once started. There is no idle timeout; the process only exits when you run `/superskillret-stop` or kill it.
-- **Prebuilt index lives at [`youngryankim/superskillret-index`](https://huggingface.co/datasets/youngryankim/superskillret-index).** Users get the fast (~5 s) install path when the dataset is accessible. If the dataset is offline or private without a token, `install.sh` falls back to rebuilding locally (1 min on GPU, 30–60 min on CPU).
+- **Daemon holds ~1.5 GB RAM** once started. There is no idle timeout; the process only exits when you run `/superskillret:stop` or kill it.
+- **Prebuilt index lives at [`youngryankim/superskillret-index`](https://huggingface.co/datasets/youngryankim/superskillret-index).** Users get the fast (~5 s) install path when the dataset is accessible. If the dataset is offline, `install.sh` falls back to rebuilding locally (30–60 min on CPU).
 - **Not published as a Claude Code marketplace plugin.** No `/plugin install superskillret@...` path exists — only the manual `settings.json` hook wiring described above.
 - **Not tested against a live Claude Code session end-to-end.** The hook and daemon were verified by feeding synthetic `UserPromptSubmit` payloads; the real CLI hookup was not exercised.
-- **No GPU auto-detection in install.sh.** `install.sh` always installs the CPU torch wheel; GPU users must manually reinstall torch with CUDA.
 - **Quality is untested beyond 8 hand-picked queries.** There is no regression eval against the SKILLRET benchmark splits to confirm it still delivers the 0.79 NDCG@15 / 0.85 Recall@10 numbers from the model card.
 
 ### Roadmap for the next session
@@ -275,11 +265,7 @@ Each item below is intended to be actionable in a fresh Claude Code session with
 - Verify `/plugin marketplace add <repo>` and `/plugin install superskillret@<marketplace>` work.
 - Write an update flow (version bump + `git tag`).
 
-**6. GPU auto-detect in `install.sh`**
-- Probe `nvidia-smi` or `torch.cuda.is_available()` before the `pip install torch` line; if GPU is present, use `--index-url https://download.pytorch.org/whl/cu121` (or the latest stable CUDA wheel).
-- Keep an env override (`SUPERSKILLRET_FORCE_CPU=1`) for users who want to pin to CPU.
-
-**7. Regression eval against the benchmark**
+**6. Regression eval against the benchmark**
 - Load `ThakiCloud/SKILLRET` `queries` + `qrels` test splits.
 - Run each query through the running daemon (or directly against `SentenceTransformer`), compute NDCG@15 and Recall@10.
 - Commit the eval script at `scripts/eval.py`. Use it as a gate before any change that swaps the model or the embedding encoder.
@@ -291,7 +277,7 @@ Each item below is intended to be actionable in a fresh Claude Code session with
 | `scripts/daemon.py` | socket server holding model+index | idle timeout, ONNX swap, better concurrency |
 | `scripts/retrieve.py` | thin socket client, hook entry point | payload-schema changes in real CC hook |
 | `scripts/build_index.py` | encodes skill pool → `.npy` + metadata | ONNX encoder swap, quantized embeddings |
-| `scripts/install.sh` | venv + deps + data + index (HF prebuilt first) | GPU auto-detect, public-dataset switch |
+| `scripts/install.sh` | venv + deps + data + index (HF prebuilt first) | public-dataset switch, timeout tuning |
 | `scripts/publish_index.py` | upload cache/ to HF dataset repo | rerun after corpus or encoder changes |
 | `hooks/hooks.json` | registers `UserPromptSubmit` command | marketplace packaging, timeout tuning |
 | `commands/*.md` | `/superskillret-status`, `/superskillret-stop` | add `/superskillret-restart`, `/superskillret-rebuild` |
@@ -302,7 +288,6 @@ Each item below is intended to be actionable in a fresh Claude Code session with
 - Skill corpus: [`ThakiCloud/SKILLRET`](https://huggingface.co/datasets/ThakiCloud/SKILLRET) — `skills` config has `train` (10,123) + `test` (6,660) splits. Also `queries` + `qrels` configs for eval.
 - Claude Code hook schema: `UserPromptSubmit` receives JSON on stdin and expects JSON on stdout with `{"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "..."}}`.
 - Daemon protocol: line-delimited JSON over Unix socket. Ops supported: `ping`, `shutdown`, and plain `{"prompt": ..., "top_k": ..., "min_score": ...}`.
-- Working env on this machine: `/home/ubuntu/anaconda3/envs/swift_gkd_bw/bin/python3` has a GPU-enabled PyTorch install useful for quick daemon tests outside the plugin venv.
 
 ## License
 

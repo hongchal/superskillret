@@ -48,8 +48,7 @@ fi
 log "upgrading pip"
 "$PIP" install --quiet --upgrade pip
 
-# Install CPU-only torch by default. GPU users can reinstall torch with CUDA
-# afterwards; sentence-transformers will pick up whichever torch is installed.
+# superskillret is CPU-only — always install the CPU torch wheel.
 if ! "$PY" -c "import torch" 2>/dev/null; then
   log "installing torch (CPU wheel)"
   "$PIP" install --quiet torch --index-url https://download.pytorch.org/whl/cpu
