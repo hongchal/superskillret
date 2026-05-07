@@ -94,22 +94,43 @@ Inspect / control the daemon via slash commands (available only with the marketp
 
 ## Configuration
 
-Environment variables (set in shell, hook command, or `settings.json` `env`):
+### Retrieval hyperparameters
+
+These two control the **quality / token-cost tradeoff**. Every prompt you send gets `top_k` skills (each a full `SKILL.md`, ~2-5 KB) injected as additional context, which Claude pays for in input tokens.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `SUPERSKILLRET_TOP_K` | `3` | how many skills to return |
-| `SUPERSKILLRET_MIN_SCORE` | `0.25` | drop hits below this cosine score |
+| `SUPERSKILLRET_TOP_K` | **`3`** | How many skills to inject per prompt. Higher = more context, more tokens, more cost. |
+| `SUPERSKILLRET_MIN_SCORE` | **`0.40`** | Drop hits below this cosine score. Higher = stricter (fewer, more relevant hits — sometimes zero). Lower = noisier. |
+
+**Token-cost calibration** (measured against this session, ~42 KB average additional context at `TOP_K=5 / MIN_SCORE=0.25`):
+
+| Setting | Injected tokens / prompt | Relative cost |
+|---|---|---|
+| `TOP_K=5`, `MIN_SCORE=0.25` | ~10,000 (median) | baseline |
+| **`TOP_K=3`, `MIN_SCORE=0.40`** (default) | **~5,000–6,000** | **~50 % off** — sweet spot |
+| `TOP_K=1`, `MIN_SCORE=0.40` | ~1,500–2,500 | ~80 % off |
+| `TOP_K=3`, `MIN_SCORE=0.55` | 0–3,000 (many prompts get 0 hits) | aggressive — turns retrieval off for off-topic asks |
+
+`MIN_SCORE=0.40` is tuned so irrelevant prompts (small talk, meta-questions) skip the hook entirely and pay nothing, while real engineering questions still surface 1-3 on-topic skills.
+
+### Runtime settings
+
+| Variable | Default | Meaning |
+|---|---|---|
 | `SUPERSKILLRET_DEVICE` | `cpu` | `cpu`, `cuda`, or `auto` (auto prefers GPU when available) |
-| `SUPERSKILLRET_BACKEND` | `onnx` | `onnx` (INT8, ~0.07 s) or `pytorch` (~5 s, sentence-transformers). ONNX falls back to PyTorch automatically if the model files are missing. |
+| `SUPERSKILLRET_BACKEND` | `onnx` | `onnx` (INT8, ~0.07 s) or `pytorch` (~5 s). ONNX falls back to PyTorch if model files are missing. |
 | `SUPERSKILLRET_ONNX_DIR` | `${CLAUDE_PLUGIN_ROOT}/onnx_model_int8` | directory containing `model.onnx` + tokenizer files |
 | `SUPERSKILLRET_ONNX_REPO` | `youngryankim/superskillret-onnx-int8` | HF Hub repo `install.sh` downloads the ONNX encoder from |
+| `SUPERSKILLRET_INDEX_REPO` | `youngryankim/superskillret-index` | HF Hub repo `install.sh` downloads the prebuilt embedding index from |
 | `SUPERSKILLRET_SOCKET` | `/tmp/superskillret.sock` | daemon socket |
 | `SUPERSKILLRET_PIDFILE` | `/tmp/superskillret.pid` | daemon pid file |
 | `SUPERSKILLRET_LOG` | `/tmp/superskillret.log` | daemon log file |
-| `SUPERSKILLRET_MODEL` | `ThakiCloud/SkillRet-Embedding-0.6B` | embedding model |
-| `SUPERSKILLRET_SPAWN_WAIT` | `90` | seconds the hook waits for daemon boot |
+| `SUPERSKILLRET_MODEL` | `ThakiCloud/SkillRet-Embedding-0.6B` | embedding model (PyTorch backend only) |
+| `SUPERSKILLRET_SPAWN_WAIT` | `180` | seconds the hook waits for daemon boot on first prompt |
 | `SUPERSKILLRET_DISABLE` | unset | set to `1` to turn the hook into a no-op |
+
+All variables can be set in your shell, in the hook `command`, or in `settings.json` under `"env": {...}`.
 
 ## Expected latency
 
@@ -175,7 +196,9 @@ Model reported eval: NDCG@15 = 0.7887, Recall@10 = 0.8542.
 
 **Nothing is being injected.** Run `/superskillret-status`. If the socket is missing and pinging fails, run `.venv/bin/python scripts/daemon.py` in a terminal to see the error.
 
-**Retrieval is picking wrong skills.** Raise `SUPERSKILLRET_MIN_SCORE` (e.g. `0.4`) so weak matches are dropped, or lower `TOP_K` to 1.
+**Retrieval is picking wrong skills / too much noise.** Raise `SUPERSKILLRET_MIN_SCORE` (try `0.45` or `0.50`) so only strongly related skills survive. You can also lower `SUPERSKILLRET_TOP_K` to 1 or 2.
+
+**Claude's context window fills up too fast.** Each prompt injects up to `TOP_K` skills (~1.5-5 KB each). Drop `TOP_K` to 1-2, or raise `MIN_SCORE` so many prompts retrieve nothing at all. See the token-cost table in the Configuration section.
 
 **Want to use a custom skill pool.** Replace `skill_pool/skills.jsonl` (one JSON per line with at least `name`, `description`, `body`), then `python scripts/build_index.py`.
 
