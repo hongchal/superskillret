@@ -164,11 +164,13 @@ if [ "$need_index" = "1" ]; then
   "$PY" "$ROOT/scripts/build_index.py" --batch-size 32
 fi
 
+touch "$ROOT/.installed"
+
 log "install complete."
 log "  plugin python:  $PY"
 log "  socket path:    ${SUPERSKILLRET_SOCKET:-/tmp/superskillret.sock}"
 log "  index:          $EMB ($(du -h "$EMB" 2>/dev/null | cut -f1))"
 log "  metadata:       $META ($(du -h "$META" 2>/dev/null | cut -f1))"
 log ""
-log "Claude Code hook is pre-wired in hooks/hooks.json using:"
-log "  \${CLAUDE_PLUGIN_ROOT}/.venv/bin/python \${CLAUDE_PLUGIN_ROOT}/scripts/retrieve.py"
+log "Claude Code hook is pre-wired in hooks/hooks.json; skill retrieval"
+log "will activate automatically on your next user prompt."

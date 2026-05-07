@@ -1,6 +1,8 @@
 # superskillret
 
-> Embedding-based **skill retrieval plugin for Claude Code**. On every user prompt, it silently picks the top-K most relevant skills from a pool of 16,783 public skills and injects them as context — so Claude gets the right "how to" reference without you preloading every skill in the system prompt.
+> Embedding-based **skill retrieval plugin for Claude Code**. On every user prompt it silently picks the top‑K most relevant skills from a pool of 16,783 public skills and injects them as context — so Claude gets the right "how to" reference without you preloading every skill in the system prompt.
+
+Built on [`ThakiCloud/SkillRet-Embedding-0.6B`](https://huggingface.co/ThakiCloud/SkillRet-Embedding-0.6B) (fine‑tuned from Qwen3‑Embedding‑0.6B) over the [`ThakiCloud/SKILLRET`](https://huggingface.co/datasets/ThakiCloud/SKILLRET) 16,783‑skill corpus. Ships with an INT8‑quantized ONNX encoder ([`youngryankim/superskillret-onnx-int8`](https://huggingface.co/youngryankim/superskillret-onnx-int8), 598 MB) plus a prebuilt, INT8‑quantized embedding index ([`youngryankim/superskillret-index`](https://huggingface.co/datasets/youngryankim/superskillret-index)). Warm retrieval is ~0.3 s end‑to‑end on CPU.
 
 ## Quickstart
 
@@ -11,137 +13,104 @@ In a Claude Code session:
 /plugin install superskillret@lotusroot-kim
 ```
 
-Then, one-time, from the plugin directory (Claude Code shows you where it was cloned — usually under `~/.claude/plugins/cache/`):
+Then restart Claude Code (or run `/reload-plugins`). On the next `SessionStart`, a bootstrap hook spawns `scripts/install.sh` in the background. It creates a local venv, downloads the ONNX INT8 encoder and the prebuilt skill index from Hugging Face, and writes a `.installed` marker when it finishes — typically **1–2 minutes** on a reasonable connection.
 
-```bash
-bash scripts/install.sh
-```
+While setup is running your first user prompts get a short English notice asking you to wait. Once `.installed` lands, skill retrieval activates automatically on every subsequent prompt. No manual step required.
 
-That's it. On your next user prompt, a local retrieval daemon lazy-starts, loads the embedding model + index once, and from then on every prompt you send gets the top-K relevant skills injected as additional context. Slash commands `/superskillret:status` and `/superskillret:stop` are available for inspection.
+Follow progress with `tail -f /tmp/superskillret-install.log`. Inspect or reset the daemon at any time with `/superskillret:status` and `/superskillret:stop`.
 
----
+## How it works
 
-Built on [`ThakiCloud/SkillRet-Embedding-0.6B`](https://huggingface.co/ThakiCloud/SkillRet-Embedding-0.6B) (fine-tuned from Qwen3-Embedding-0.6B) and the [`ThakiCloud/SKILLRET`](https://huggingface.co/datasets/ThakiCloud/SKILLRET) 16,783-skill corpus. Ships with an INT8-quantized ONNX encoder ([`youngryankim/superskillret-onnx-int8`](https://huggingface.co/youngryankim/superskillret-onnx-int8), 598 MB) plus a prebuilt embedding index ([`youngryankim/superskillret-index`](https://huggingface.co/datasets/youngryankim/superskillret-index)) for ~0.07 s CPU retrieval.
+![superskillret end-to-end flow](figure/superskillret.png)
 
-## What it does
+Every user prompt flows through the same pipeline:
 
-1. `UserPromptSubmit` hook fires on every user prompt.
-2. Hook talks to a local retrieval daemon over a Unix socket.
-3. Daemon encodes the prompt, finds top-K skills by cosine similarity, returns full `SKILL.md` bodies.
-4. Hook emits a Claude Code `additionalContext` JSON so Claude sees the retrieved skills before answering.
+1. **User** sends a prompt.
+2. The **`UserPromptSubmit` hook** (`scripts/retrieve.py`) intercepts it before Claude sees it.
+3. The hook talks to the **local retrieval daemon** over a Unix socket. The daemon lazy‑starts on the first request and then stays warm — model and index are loaded **once**.
+4. The daemon encodes the prompt (ONNX INT8, ~0.1 s on CPU) and runs cosine similarity against the **pre‑embedded skill pool** (16,783 public skills, prebuilt index).
+5. The hook formats the top‑K `SKILL.md` bodies as an `additionalContext` JSON and emits it back to Claude Code.
+6. **Claude** gets the original prompt plus the injected skills and answers with that extra reference material.
 
-The daemon is lazy-started on the first request and then stays warm. Model + index are loaded **once** per process.
+Two details not shown in the diagram but live in the code:
 
-## What `install.sh` does
-
-The one-time `bash scripts/install.sh` step:
-- create `.venv/` (CPU torch wheel)
-- install `sentence-transformers`, `datasets`, `numpy`, `huggingface_hub`
-- download the embedding model (~1.2 GB) via Hugging Face cache
-- **fetch the prebuilt index** (~194 MB) from [`youngryankim/superskillret-index`](https://huggingface.co/datasets/youngryankim/superskillret-index) — takes ~5 s on a decent connection
-- fall back to building the index locally only if the prebuilt dataset is unreachable (offline, deleted). Local build time: **~30–60 min on CPU** — and requires the 300 MB skill pool download.
-
-Set `FORCE=1` to rebuild/refetch everything from scratch.
-Set `SUPERSKILLRET_INDEX_REPO=<user>/<repo>` to point at a different prebuilt-index dataset.
-Set `SUPERSKILLRET_SKIP_PREBUILT=1` to force a local build.
-
-superskillret is **CPU-only**. A single 0.6B-parameter forward pass per prompt (~0.3 s with the ONNX INT8 encoder) fits well inside Claude's own answer-generation latency, so there's no GPU path to configure.
-
-## Alternative: direct hook in `settings.json` (no marketplace)
-
-If you don't want to go through the Claude Code plugin marketplace, clone this repo somewhere, run `bash scripts/install.sh`, and add to your `~/.claude/settings.json`:
-
-```json
-{
-  "hooks": {
-    "UserPromptSubmit": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/absolute/path/to/superskillret/.venv/bin/python /absolute/path/to/superskillret/scripts/retrieve.py",
-            "timeout": 120000
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-This path skips the marketplace and slash commands, but the hook runs the same.
-
-## Usage
-
-Nothing. Just talk to Claude. After the first prompt (~15–30s cold warm-up to load the ONNX model), every prompt has top-K retrieved skills silently injected.
-
-Inspect / control the daemon via slash commands (available only with the marketplace install):
-
-| Command | What it does |
-|---|---|
-| `/superskillret:status` | show daemon pid, socket state, recent log |
-| `/superskillret:stop` | kill the daemon; it will lazy-start on next prompt |
+- **First‑time setup is automatic.** A `SessionStart` hook (`scripts/bootstrap.sh`) forks `scripts/install.sh` in the background on first load to create the venv and download the encoder + index from Hugging Face, writing a `.installed` marker when done. While setup runs, the hook shows a polite English wait‑notice instead of retrieval.
+- **Per‑session dedup.** The daemon tracks, per `session_id`, which skills it already returned and skips them in future retrievals for that session, so the same `SKILL.md` isn't re‑injected into every turn. Clear with `/superskillret:reset`.
 
 ## Configuration
 
 ### Retrieval hyperparameters
 
-These two control the **quality / token-cost tradeoff**. Every prompt you send gets `top_k` skills (each a full `SKILL.md`, ~2-5 KB) injected as additional context, which Claude pays for in input tokens.
+These two knobs control the **quality vs. token‑cost** tradeoff. Every prompt injects up to `TOP_K` full `SKILL.md` bodies (~2–5 KB each) into Claude's context.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `SUPERSKILLRET_TOP_K` | **`3`** | How many skills to inject per prompt. Higher = more context, more tokens, more cost. |
-| `SUPERSKILLRET_MIN_SCORE` | **`0.30`** | Drop hits below this cosine score. Higher = stricter (fewer, more relevant hits — sometimes zero). Lower = noisier. |
+| `SUPERSKILLRET_TOP_K` | **`3`** | How many skills to inject per prompt. Higher = more context, more input tokens. |
+| `SUPERSKILLRET_MIN_SCORE` | **`0.30`** | Drop hits below this cosine score. Higher = stricter, fewer (sometimes zero) hits. |
 
-**Token-cost calibration** (measured against this session, ~42 KB average additional context at `TOP_K=5 / MIN_SCORE=0.25`):
+Token‑cost calibration (empirical, ~42 KB average additional context at `TOP_K=5 / MIN_SCORE=0.25`):
 
-| Setting | Injected tokens / prompt | Relative cost |
+| Setting | Extra input tokens / prompt | Relative cost |
 |---|---|---|
 | `TOP_K=5`, `MIN_SCORE=0.25` | ~10,000 (median) | baseline |
-| **`TOP_K=3`, `MIN_SCORE=0.30`** (default) | **~5,000–7,000** | **~40–50 % off** — recall-leaning default |
-| `TOP_K=3`, `MIN_SCORE=0.40` | ~3,000–6,000 | ~60 % off — stricter, fewer but more relevant hits |
+| **`TOP_K=3`, `MIN_SCORE=0.30`** (default) | **~5,000–7,000** | **~40–50 % off** — recall‑leaning |
+| `TOP_K=3`, `MIN_SCORE=0.40` | ~3,000–6,000 | ~60 % off — stricter |
 | `TOP_K=1`, `MIN_SCORE=0.40` | ~1,500–2,500 | ~80 % off |
-| `TOP_K=3`, `MIN_SCORE=0.55` | 0–3,000 (many prompts get 0 hits) | aggressive — turns retrieval off for off-topic asks |
+| `TOP_K=3`, `MIN_SCORE=0.55` | 0–3,000 (often 0) | aggressive; most off‑topic prompts inject nothing |
 
-The default `MIN_SCORE=0.30` keeps most engineering prompts surfacing 2-3 skills. Small talk / meta-questions still often fall below the threshold and skip injection entirely. Bump to `0.40` or `0.45` if you want less context per prompt.
+Bump `MIN_SCORE` if you want fewer, more relevant hits; lower it if you want more recall.
 
 ### Runtime settings
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `SUPERSKILLRET_BACKEND` | `onnx` | `onnx` (INT8, ~0.07 s) or `pytorch` (~5 s). ONNX falls back to PyTorch if model files are missing. |
-| `SUPERSKILLRET_ONNX_DIR` | `${CLAUDE_PLUGIN_ROOT}/onnx_model_int8` | directory containing `model.onnx` + tokenizer files |
-| `SUPERSKILLRET_ONNX_REPO` | `youngryankim/superskillret-onnx-int8` | HF Hub repo `install.sh` downloads the ONNX encoder from |
-| `SUPERSKILLRET_INDEX_REPO` | `youngryankim/superskillret-index` | HF Hub repo `install.sh` downloads the prebuilt embedding index from |
-| `SUPERSKILLRET_SOCKET` | `/tmp/superskillret.sock` | daemon socket |
+| `SUPERSKILLRET_SOCKET` | `/tmp/superskillret.sock` | daemon Unix socket |
 | `SUPERSKILLRET_PIDFILE` | `/tmp/superskillret.pid` | daemon pid file |
 | `SUPERSKILLRET_LOG` | `/tmp/superskillret.log` | daemon log file |
-| `SUPERSKILLRET_MODEL` | `ThakiCloud/SkillRet-Embedding-0.6B` | embedding model (PyTorch backend only) |
-| `SUPERSKILLRET_SPAWN_WAIT` | `180` | seconds the hook waits for daemon boot on first prompt |
-| `SUPERSKILLRET_DISABLE` | unset | set to `1` to turn the hook into a no-op |
+| `SUPERSKILLRET_INSTALL_LOG` | `/tmp/superskillret-install.log` | background install log |
+| `SUPERSKILLRET_ONNX_DIR` | `<plugin>/onnx_model_int8` | directory containing `model.onnx` + tokenizer |
+| `SUPERSKILLRET_ONNX_REPO` | `youngryankim/superskillret-onnx-int8` | HF repo the encoder is fetched from |
+| `SUPERSKILLRET_INDEX_REPO` | `youngryankim/superskillret-index` | HF repo the prebuilt index is fetched from |
+| `SUPERSKILLRET_SPAWN_WAIT` | `180` | seconds the hook waits for a lazy‑spawned daemon to come up |
+| `SUPERSKILLRET_DISABLE` | unset | set to `1` to turn the hook into a no‑op |
+| `SUPERSKILLRET_BACKEND` | `onnx` | normally leave alone; the daemon auto‑falls‑back to `pytorch` if the ONNX files are missing |
+| `SUPERSKILLRET_SEEN_TRACKING` | `1` | per‑session dedup: skip skills already returned in the same Claude Code session. Set to `0` to always return the absolute top‑K. |
+| `SUPERSKILLRET_MAX_SESSIONS` | `100` | LRU cap on tracked sessions in memory |
+| `SUPERSKILLRET_OVERFETCH` | `4` | when dedup is on, fetch top‑K × this many candidates before filtering |
 
-All variables can be set in your shell, in the hook `command`, or in `settings.json` under `"env": {...}`.
+Variables can be set in the shell, in `~/.claude/settings.json` under `"env": {...}`, or in the hook `command` itself.
 
-## Expected latency
+### Forcing a re‑install / re‑fetch
 
-All numbers measured end-to-end from hook invocation (Python startup → socket round trip → daemon encode + similarity → emit JSON).
+| Command | Effect |
+|---|---|
+| `FORCE=1 bash scripts/install.sh` | wipe `.venv/` and re‑run every step from scratch |
+| `SUPERSKILLRET_SKIP_PREBUILT=1 bash scripts/install.sh` | build the embedding index locally instead of fetching it from HF (useful when customizing the skill pool) |
 
-### Default — ONNX INT8 backend
+### CPU‑only
+
+superskillret runs on CPU by design. A single ONNX INT8 forward pass per prompt is ~0.1 s, which fits inside Claude's own answer latency — there is no GPU path to configure.
+
+## Latency
+
+End‑to‑end, hook invocation to `additionalContext` emitted.
 
 | Call | Latency | Notes |
 |---|---|---|
-| First prompt (cold; daemon boot + ONNX load) | ~15–30 s | one-time per Claude Code session |
-| Warm prompt | **~0.3 s** | hook 0.1 s + daemon 0.2 s |
+| First prompt in a session (daemon cold; loads ONNX encoder + index) | ~15–30 s | one‑time per session |
+| Warm prompt | **~0.3 s** | ~0.1 s hook Python startup + ~0.2 s daemon work |
 
-### PyTorch fallback (`SUPERSKILLRET_BACKEND=pytorch`)
+Retrieval quality vs. the un‑quantized FP32 reference: top‑1 skill identical across the smoke‑test queries; top‑5 overlap ~80 % (same topic, minor reshuffles between near‑duplicate skills in the corpus).
 
-| Call | Latency |
+## Usage
+
+You don't interact with superskillret directly — it just runs on every user prompt via the `UserPromptSubmit` hook.
+
+| Slash command | What it does |
 |---|---|
-| Cold | ~60–120 s |
-| Warm | ~5–7 s |
-
-The ONNX INT8 default is ~20× faster than the PyTorch path and 4× smaller on disk (598 MB vs 2.4 GB). Retrieval quality versus FP32: top-1 skill identical, top-5 overlap ~80% (same topic, minor reshuffles between near-duplicate skills in the corpus).
+| `/superskillret:status` | daemon pid, socket state, last 20 log lines |
+| `/superskillret:stop` | kill the daemon; it lazy‑starts again on the next prompt |
+| `/superskillret:reset` | clear the per‑session "already seen" skill memory so the next prompt can surface any skill again |
 
 ## Files
 
@@ -149,145 +118,91 @@ The ONNX INT8 default is ~20× faster than the PyTorch path and 4× smaller on d
 superskillret/
 ├── .claude-plugin/
 │   ├── plugin.json                # plugin manifest
-│   └── marketplace.json           # self-hosted marketplace entry
-├── hooks/hooks.json               # UserPromptSubmit hook registration
+│   └── marketplace.json           # self‑hosted marketplace entry (HTTPS URL source)
+├── hooks/hooks.json               # registers SessionStart (bootstrap) + UserPromptSubmit (retrieve)
 ├── commands/
 │   ├── status.md                  # /superskillret:status
-│   └── stop.md                    # /superskillret:stop
+│   ├── stop.md                    # /superskillret:stop
+│   └── reset.md                   # /superskillret:reset (clear per-session dedup memory)
 ├── scripts/
-│   ├── install.sh                 # one-shot setup (venv, onnx, index)
-│   ├── build_index.py             # (re)build the embedding index from skill pool
-│   ├── quantize_onnx.py           # INT8-quantize a fresh ONNX export
-│   ├── publish_index.py           # upload index cache to HF dataset
-│   ├── daemon.py                  # long-running retrieval server
-│   ├── retrieve.py                # UserPromptSubmit hook (thin socket client)
-│   ├── compare_backends.py        # PyTorch vs ONNX FP32 vs INT8 parity bench
-│   └── smoke_test.py              # sanity test for retrieval quality
-├── onnx_model_int8/               # INT8 encoder (downloaded by install.sh)
-│   ├── model.onnx                 # 598 MB
-│   └── tokenizer files
-├── skill_pool/skills.jsonl        # 16,783 skills (downloaded only on fallback build)
-└── cache/
-    ├── skill_embeddings.npy       # normalized embeddings, float32
-    ├── skill_embeddings_int8.npy  # INT8-quantized embeddings (75% smaller, optional)
-    ├── skill_embeddings_scale.npy # per-vector scale factors for INT8 dequantization
-    └── skill_metadata.jsonl       # one JSON record per embedding
+│   ├── bootstrap.sh               # SessionStart: fork install.sh in background, exit in ms
+│   ├── install.sh                 # one‑shot setup (venv, ONNX encoder, embedding index)
+│   ├── daemon.py                  # long‑running retrieval server (Unix socket)
+│   ├── retrieve.py                # UserPromptSubmit hook: thin socket client + wait‑notice
+│   ├── build_index.py             # (re)build the embedding index from a skill pool
+│   ├── quantize_onnx.py           # INT8‑quantize a fresh ONNX export
+│   ├── publish_index.py           # upload cache/ to HF dataset repo (maintainer only)
+│   ├── compare_backends.py        # PyTorch vs ONNX FP32 vs INT8 parity benchmark (dev)
+│   └── smoke_test.py              # small retrieval sanity test (dev)
+├── figure/
+│   ├── superskillret.pdf          # end‑to‑end flow diagram (source)
+│   └── superskillret.png          # same, rendered for README inline display
+├── onnx_model_int8/               # (downloaded) model.onnx + tokenizer files
+├── cache/                         # (downloaded) skill_embeddings(_int8|_scale).npy + metadata.jsonl
+├── skill_pool/skills.jsonl        # (optional) full skill corpus, only needed for local index rebuild
+└── .installed                     # marker written by install.sh on success; drives wait‑notice logic
 ```
 
-## INT8-quantized embedding index
+## Retrieval pipeline internals
 
-The daemon automatically uses INT8-quantized vectors when `cache/skill_embeddings_int8.npy` and `cache/skill_embeddings_scale.npy` are present, falling back to the float32 index otherwise.
+1. Each skill's `(name | description)` is encoded at build time with the SKILLRET model; embeddings are L2‑normalized.
+2. The embedding index is stored as `skill_embeddings_int8.npy` + per‑vector `skill_embeddings_scale.npy` (75 % smaller than float32 with negligible quality loss); the daemon falls back to `skill_embeddings.npy` if only the float32 copy is present.
+3. At query time the daemon encodes `"Instruct: Given a skill search query, retrieve relevant skills that match the query\nQuery: <user prompt>"` (the query‑side prompt SKILLRET was trained with) and ranks skills by inner product.
+4. Hits below `MIN_SCORE` are dropped so off‑topic prompts (small talk, meta questions) emit an empty `additionalContext` and cost zero extra tokens.
+5. **Per‑session dedup**: the daemon remembers, per `session_id`, which skills it already returned in the current Claude Code session, and skips them next time. This stops the same `SKILL.md` from being re‑injected into every turn and surfaces fresh, related skills instead. The set of remembered sessions is LRU‑capped (`SUPERSKILLRET_MAX_SESSIONS`), reset per daemon restart, or clearable via `/superskillret:reset`.
 
-| Index | Size | Memory | Quality |
-|---|---|---|---|
-| `skill_embeddings.npy` (float32) | 68.7 MB | ~400 MB loaded | baseline |
-| `skill_embeddings_int8.npy` (INT8) | 17.2 MB | ~100 MB loaded | top-10 overlap 100%, score error < 0.002 |
-
-**To generate the INT8 index** (one-time, a few seconds):
-
-```python
-import numpy as np
-from pathlib import Path
-
-CACHE = Path("~/.claude/plugins/cache/lotusroot-kim/superskillret/0.1.0/cache").expanduser()
-emb = np.load(CACHE / "skill_embeddings.npy").astype(np.float32)
-scale = np.max(np.abs(emb), axis=1, keepdims=True)
-emb_int8 = np.round(emb / (scale + 1e-12) * 127).astype(np.int8)
-np.save(CACHE / "skill_embeddings_int8.npy", emb_int8)
-np.save(CACHE / "skill_embeddings_scale.npy", scale)
-```
-
-Once both files exist, the daemon loads them automatically on next start. No config change needed.
-
-## How retrieval works
-
-1. Each skill's `(name | description)` is encoded at build time with the SKILLRET model.
-2. Vectors stored as normalized float32 → `.npy` (or INT8 if quantized).
-3. At query time the daemon encodes `"Instruct: ... Query: <prompt>"` (the query-side prompt SKILLRET was trained with) and takes top-K by inner product.
-4. Hits below `MIN_SCORE` are dropped so irrelevant prompts don't get noise injected.
-
-Model reported eval: NDCG@15 = 0.7887, Recall@10 = 0.8542.
+Model card eval (FP32): NDCG@15 = 0.7887, Recall@10 = 0.8542. The INT8 pipeline shipped here hasn't been re‑benchmarked against the official SKILLRET eval splits — see Roadmap.
 
 ## Troubleshooting
 
-**Hook times out on first prompt.** The daemon is downloading the model from Hugging Face. Watch `/tmp/superskillret.log`; increase `SUPERSKILLRET_SPAWN_WAIT`.
-
-**Nothing is being injected.** Run `/superskillret-status`. If the socket is missing and pinging fails, run `.venv/bin/python scripts/daemon.py` in a terminal to see the error.
-
-**Retrieval is picking wrong skills / too much noise.** Raise `SUPERSKILLRET_MIN_SCORE` (try `0.45` or `0.50`) so only strongly related skills survive. You can also lower `SUPERSKILLRET_TOP_K` to 1 or 2.
-
-**Claude's context window fills up too fast.** Each prompt injects up to `TOP_K` skills (~1.5-5 KB each). Drop `TOP_K` to 1-2, or raise `MIN_SCORE` so many prompts retrieve nothing at all. See the token-cost table in the Configuration section.
-
-**Want to use a custom skill pool.** Replace `skill_pool/skills.jsonl` (one JSON per line with at least `name`, `description`, `body`), then `python scripts/build_index.py`.
+- **First prompt just shows a "setup is running" notice.** Expected. `install.sh` is still downloading in the background. `tail -f /tmp/superskillret-install.log` to watch progress; retry the prompt in a minute.
+- **Hook times out.** `install.sh` is still going but exceeded `SUPERSKILLRET_SPAWN_WAIT` (default 180 s) from the hook's point of view. Usually harmless — the install continues; try another prompt. To raise the window: export `SUPERSKILLRET_SPAWN_WAIT=300`.
+- **No skills ever get injected.** Run `/superskillret:status`. If the socket is missing and ping fails, try `bash scripts/install.sh` directly in a terminal to see the full error. Common causes: HF repo unreachable, pip install failed.
+- **Retrieved skills feel off.** Raise `SUPERSKILLRET_MIN_SCORE` to `0.40`–`0.45` so only strongly matching hits survive, and/or drop `SUPERSKILLRET_TOP_K` to 1–2.
+- **Context window fills up too fast.** Each hit is ~2–5 KB of `SKILL.md`; lower `TOP_K` and raise `MIN_SCORE`. See the token‑cost table above.
+- **Want to use a custom skill pool.** Replace `skill_pool/skills.jsonl` (one JSON record per line with `name`, `description`, `body`), run `python scripts/build_index.py`, then restart the daemon via `/superskillret:stop`.
 
 ## Status & roadmap
 
-MVP is complete and verified end-to-end on CPU with the ONNX INT8 backend. Retrieval works, daemon + socket client round-trip works, slash commands work. What remains is productionization.
+Production‑ready and installed via the `lotusroot-kim` marketplace. End‑to‑end verified in a live Claude Code session. Default backend is ONNX INT8, default embedding index is INT8‑quantized, default install path (HF prebuilt fetch) takes ~45 s on a healthy connection.
 
-### Known limitations today
+### What's shipped
 
-- **CPU warm latency is 7–9 s.** Most of it is the PyTorch forward pass for a 0.6B-parameter model. Usable, but not great for chatty sessions.
-- **Daemon holds ~1.4 GB RAM** once started (ONNX INT8 encoder + INT8 embedding index). No idle timeout; the process only exits when you run `/superskillret:stop` or kill it. PyTorch-backend sessions take more (~2.4 GB).
-- **Prebuilt index lives at [`youngryankim/superskillret-index`](https://huggingface.co/datasets/youngryankim/superskillret-index).** Users get the fast (~5 s) install path when the dataset is accessible. If the dataset is offline, `install.sh` falls back to rebuilding locally (30–60 min on CPU).
-- **Not published as a Claude Code marketplace plugin.** No `/plugin install superskillret@...` path exists — only the manual `settings.json` hook wiring described above.
-- **Not tested against a live Claude Code session end-to-end.** The hook and daemon were verified by feeding synthetic `UserPromptSubmit` payloads; the real CLI hookup was not exercised.
-- **Quality is untested beyond 8 hand-picked queries.** There is no regression eval against the SKILLRET benchmark splits to confirm it still delivers the 0.79 NDCG@15 / 0.85 Recall@10 numbers from the model card.
+- **ONNX INT8 encoder** (598 MB, ~0.1 s CPU inference) replaces the 2.4 GB PyTorch path. ~18× faster than the original 5.5 s warm latency. Published at [`youngryankim/superskillret-onnx-int8`](https://huggingface.co/youngryankim/superskillret-onnx-int8).
+- **INT8‑quantized embedding index** (17 MB + 67 KB scale vs. 34 MB FP32), auto‑selected by the daemon when present. Reconstruction error mean 2e‑4 / max 8e‑4.
+- **Prebuilt index** at [`youngryankim/superskillret-index`](https://huggingface.co/datasets/youngryankim/superskillret-index) (public). `install.sh` downloads in ~5 s, falls back to a local rebuild (30–60 min on CPU) only if HF is unreachable.
+- **Self‑hosted marketplace** in the same repo (`.claude-plugin/marketplace.json`, HTTPS source so SSH‑keyless installs work).
+- **Auto‑bootstrap**: `SessionStart` hook forks `install.sh` in the background; `retrieve.py` shows a polite English wait‑notice until the `.installed` marker appears. No manual `bash scripts/install.sh` required for regular users.
 
-### Roadmap for the next session
+### Known limitations
 
-Each item below is intended to be actionable in a fresh Claude Code session without prior context. Pick one, not all.
+- **No idle timeout on the daemon.** It stays resident (~1.4 GB RAM) until `/superskillret:stop` or a kill.
+- **Quality is spot‑checked, not formally benchmarked.** Parity vs. the FP32 PyTorch reference is top‑1 100 % / top‑5 80 % on a 10‑query smoke test. NDCG@15 / Recall@10 against the official SKILLRET eval splits has not been re‑run for the INT8 pipeline.
+- **Token cost is real.** At defaults each on‑topic prompt costs ~5–7 K extra input tokens. See Configuration for the cost table.
 
-**1. Cut CPU latency from ~8 s to ~2 s** (biggest UX win)
-- Export SKILLRET model to ONNX: `optimum-cli export onnx --model ThakiCloud/SkillRet-Embedding-0.6B ./onnx_model`
-- Quantize to INT8: use `optimum.onnxruntime` `ORTQuantizer` with dynamic quantization.
-- Swap `SentenceTransformer(...)` call in `daemon.py` for `optimum.onnxruntime.ORTModelForFeatureExtraction` + a small mean-pooling wrapper.
-- Compare NDCG@15 on a SKILLRET eval subset before vs. after to confirm ≤1% quality drop.
-- Expected result: model size 1.2 GB → ~400 MB, CPU inference 3–5× faster.
+### Roadmap — pick‑one, pick‑none
 
-**2. Refresh the prebuilt index** (already published, already public — see `youngryankim/superskillret-index`)
-- Index is version-stamped via `cache/VERSION`.
-- `install.sh` already tries the prebuilt index first and falls back to `build_index.py` on failure.
-- When the corpus or encoder changes: bump `cache/VERSION`, rerun `python scripts/build_index.py`, then `HF_TOKEN=... python scripts/publish_index.py --repo youngryankim/superskillret-index` (drop `--private` since the dataset is public).
+1. **Daemon idle timeout** — add `last_request_at` tracking in `scripts/daemon.py` plus a watchdog thread that `SIGTERM`s itself after N idle seconds (`SUPERSKILLRET_IDLE_TIMEOUT`, e.g. 1800 s). The socket client already lazy‑spawns, so reaping the daemon is free — the only cost is one cold‑start after idle.
+2. **Regression eval against the SKILLRET benchmark** — load `queries` + `qrels` test splits, compute NDCG@15 and Recall@10 for PyTorch / ONNX FP32 / ONNX INT8. Commit as `scripts/eval.py` and run it as a gate before any encoder or index swap.
+3. **Submit to the official Anthropic marketplace** — https://platform.claude.com/plugins/submit. Gets the plugin listed under `claude-plugins-official` in the `/plugin` Discover tab. Anthropic‑curated, takes days‑to‑weeks.
 
-**3. Add idle-timeout to the daemon**
-- In `scripts/daemon.py`, track `last_request_at` on every `handle()`.
-- Add a watchdog thread that calls `os.kill(os.getpid(), SIGTERM)` if no request arrives for N seconds (env `SUPERSKILLRET_IDLE_TIMEOUT`, default e.g. 1800 s).
-- The socket client already knows how to lazy-spawn, so a reaped daemon will just restart on the next prompt.
+### Maintainer‑only — refreshing the prebuilt artefacts
 
-**4. Real Claude Code end-to-end test**
-- Start Claude Code with this plugin registered (either drop into `~/.claude/plugins/` or add to a marketplace you control).
-- Send a real user prompt like "help me write a Dockerfile for a Node app".
-- Verify via `/superskillret-status` that the daemon booted and that `additionalContext` arrived (check `~/.claude/logs/` or add a temporary `logging` line in `retrieve.py`).
-- Document any shape mismatch between the real UserPromptSubmit payload and what `retrieve.py` expects (it currently reads `payload["prompt"]`).
+Bump the index:
 
-**5. Publish to a Claude Code marketplace**
-- Create `your-marketplace/` repo with a top-level `marketplace.json` pointing at this plugin directory.
-- Verify `/plugin marketplace add <repo>` and `/plugin install superskillret@<marketplace>` work.
-- Write an update flow (version bump + `git tag`).
+```bash
+# bump cache/VERSION first, then:
+python scripts/build_index.py
+HF_TOKEN=... python scripts/publish_index.py --repo youngryankim/superskillret-index
+```
 
-**6. Regression eval against the benchmark**
-- Load `ThakiCloud/SKILLRET` `queries` + `qrels` test splits.
-- Run each query through the running daemon (or directly against `SentenceTransformer`), compute NDCG@15 and Recall@10.
-- Commit the eval script at `scripts/eval.py`. Use it as a gate before any change that swaps the model or the embedding encoder.
+Refresh the ONNX encoder:
 
-### Files of interest for future work
-
-| File | Purpose | Most likely to change for |
-|---|---|---|
-| `scripts/daemon.py` | socket server holding model+index | idle timeout, ONNX swap, better concurrency |
-| `scripts/retrieve.py` | thin socket client, hook entry point | payload-schema changes in real CC hook |
-| `scripts/build_index.py` | encodes skill pool → `.npy` + metadata | ONNX encoder swap, quantized embeddings |
-| `scripts/install.sh` | venv + deps + data + index (HF prebuilt first) | public-dataset switch, timeout tuning |
-| `scripts/publish_index.py` | upload cache/ to HF dataset repo | rerun after corpus or encoder changes |
-| `hooks/hooks.json` | registers `UserPromptSubmit` command | marketplace packaging, timeout tuning |
-| `commands/*.md` | `/superskillret-status`, `/superskillret-stop` | add `/superskillret-restart`, `/superskillret-rebuild` |
-
-### Pointers you'll want in the next session
-
-- Embedding model: [`ThakiCloud/SkillRet-Embedding-0.6B`](https://huggingface.co/ThakiCloud/SkillRet-Embedding-0.6B) — SentenceTransformers wrapper, query prompt is `"Instruct: Given a skill search query, retrieve relevant skills that match the query\nQuery: "`, max seq 8192, dim 1024.
-- Skill corpus: [`ThakiCloud/SKILLRET`](https://huggingface.co/datasets/ThakiCloud/SKILLRET) — `skills` config has `train` (10,123) + `test` (6,660) splits. Also `queries` + `qrels` configs for eval.
-- Claude Code hook schema: `UserPromptSubmit` receives JSON on stdin and expects JSON on stdout with `{"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "..."}}`.
-- Daemon protocol: line-delimited JSON over Unix socket. Ops supported: `ping`, `shutdown`, and plain `{"prompt": ..., "top_k": ..., "min_score": ...}`.
+```bash
+optimum-cli export onnx --model ThakiCloud/SkillRet-Embedding-0.6B ./onnx_model
+python scripts/quantize_onnx.py --src onnx_model --dst onnx_model_int8
+# then upload onnx_model_int8/ to youngryankim/superskillret-onnx-int8 via the HF web UI or hf upload
+```
 
 ## License
 

@@ -34,3 +34,6 @@ __pycache__/
 superskillret.sock
 superskillret.pid
 superskillret.log
+
+# Bootstrap marker written by install.sh when setup finishes.
+.installed

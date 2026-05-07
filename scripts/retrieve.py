@@ -29,11 +29,19 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DAEMON_SCRIPT = ROOT / "scripts" / "daemon.py"
+VENV_PYTHON = ROOT / ".venv" / "bin" / "python"
+INSTALL_LOCK = Path(os.environ.get("SUPERSKILLRET_INSTALL_LOCK", "/tmp/superskillret-install.lock"))
+INSTALL_DONE = ROOT / ".installed"
+INSTALL_LOG = os.environ.get("SUPERSKILLRET_INSTALL_LOG", "/tmp/superskillret-install.log")
 
 SOCKET_PATH = os.environ.get("SUPERSKILLRET_SOCKET", "/tmp/superskillret.sock")
 TOP_K = int(os.environ.get("SUPERSKILLRET_TOP_K", "3"))
 MIN_SCORE = float(os.environ.get("SUPERSKILLRET_MIN_SCORE", "0.30"))
-PYTHON = os.environ.get("SUPERSKILLRET_PYTHON", sys.executable)
+# Prefer the plugin's own venv python (has torch, onnxruntime, etc).
+# Only fall back to whatever python is running this hook if the venv isn't set up yet.
+PYTHON = os.environ.get("SUPERSKILLRET_PYTHON") or (
+    str(VENV_PYTHON) if VENV_PYTHON.exists() else sys.executable
+)
 SPAWN_WAIT = float(os.environ.get("SUPERSKILLRET_SPAWN_WAIT", "180"))
 DISABLED = os.environ.get("SUPERSKILLRET_DISABLE") == "1"
 
@@ -77,8 +85,13 @@ def wait_for_daemon(timeout: float):
     return False
 
 
-def query_daemon(prompt: str, top_k: int, min_score: float) -> dict:
-    req = json.dumps({"prompt": prompt, "top_k": top_k, "min_score": min_score}) + "\n"
+def query_daemon(prompt: str, top_k: int, min_score: float, session_id: str = "") -> dict:
+    req = json.dumps({
+        "prompt": prompt,
+        "top_k": top_k,
+        "min_score": min_score,
+        "session_id": session_id,
+    }) + "\n"
     s = connect(timeout=60.0)
     try:
         s.sendall(req.encode("utf-8"))
@@ -137,6 +150,53 @@ def emit(context: str):
     }, sys.stdout)
 
 
+def _is_installing() -> bool:
+    """True if bootstrap.sh has kicked off install.sh and it's still running."""
+    if not INSTALL_LOCK.exists():
+        return False
+    try:
+        pid = int(INSTALL_LOCK.read_text().strip())
+    except Exception:
+        return False
+    try:
+        os.kill(pid, 0)  # signal 0 == probe
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
+def _install_wait_message() -> str:
+    return (
+        "> **superskillret: first-time setup is still running in the background.**\n"
+        "> \n"
+        "> It is downloading the ONNX INT8 encoder (~598 MB) and the prebuilt skill\n"
+        "> index (~194 MB) from Hugging Face. This typically takes **1–2 minutes**\n"
+        "> on a reasonable connection, longer on slow networks or first-time pip\n"
+        "> installs. Please wait for it to finish and then retry your prompt — skill\n"
+        "> retrieval will activate automatically on the next send.\n"
+        "> \n"
+        f"> Follow progress: `tail -f {INSTALL_LOG}`\n"
+        "> Check status any time with `/superskillret:status`.\n"
+    )
+
+
+def _install_missing_message() -> str:
+    return (
+        "> **superskillret: not yet installed.**\n"
+        "> \n"
+        "> The plugin's Python environment and model files are missing. Run the\n"
+        f"> one-time setup once:\n"
+        "> \n"
+        f"> ```bash\n"
+        f"> bash {ROOT}/scripts/install.sh\n"
+        f"> ```\n"
+        "> \n"
+        "> This downloads the ONNX INT8 encoder (~598 MB) plus the prebuilt skill\n"
+        "> index (~194 MB). After it completes, skill retrieval activates on your\n"
+        "> next user prompt — no config change needed.\n"
+    )
+
+
 def main():
     if DISABLED:
         emit("")
@@ -149,8 +209,21 @@ def main():
         return
 
     prompt = payload.get("prompt") or payload.get("user_prompt") or ""
+    session_id = payload.get("session_id") or ""
     if not prompt.strip():
         emit("")
+        return
+
+    # First-run: background install kicked off by bootstrap.sh is still running.
+    # Tell the user to wait rather than trying to spawn a daemon that would fail.
+    if _is_installing():
+        emit(_install_wait_message())
+        return
+
+    # No venv? Bootstrap didn't run, or the user installed without SessionStart.
+    # Emit a gentle instruction instead of exploding.
+    if not VENV_PYTHON.exists() and not INSTALL_DONE.exists():
+        emit(_install_missing_message())
         return
 
     if not ping():
@@ -161,7 +234,7 @@ def main():
             return
 
     try:
-        result = query_daemon(prompt, TOP_K, MIN_SCORE)
+        result = query_daemon(prompt, TOP_K, MIN_SCORE, session_id=session_id)
     except Exception as e:
         sys.stderr.write(f"superskillret: query failed: {e}\n")
         emit("")
@@ -173,15 +246,18 @@ def main():
         return
 
     hits = result.get("hits", [])
+    skipped_seen = int(result.get("skipped_seen", 0))
     context = format_context(hits)
     latency = result.get("latency_s", 0)
     if context:
-        context += f"\n<!-- superskillret: {len(hits)} hit(s), {latency:.2f}s -->\n"
+        dedup_note = f", {skipped_seen} skipped (already seen this session)" if skipped_seen else ""
+        context += f"\n<!-- superskillret: {len(hits)} hit(s){dedup_note}, {latency:.2f}s -->\n"
 
     if hits:
         summary = " | ".join(f"{h.get('name','?')} ({h.get('score',0):.2f})" for h in hits)
+        dedup_note = f" ({skipped_seen} dedup-skipped)" if skipped_seen else ""
         sys.stderr.write(
-            f"superskillret: retrieved top-{len(hits)} in {latency:.2f}s → {summary}\n"
+            f"superskillret: retrieved top-{len(hits)} in {latency:.2f}s{dedup_note} → {summary}\n"
         )
     else:
         sys.stderr.write(
