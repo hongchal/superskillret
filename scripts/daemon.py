@@ -35,6 +35,8 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
 EMB_PATH = ROOT / "cache" / "skill_embeddings.npy"
+EMB_INT8_PATH = ROOT / "cache" / "skill_embeddings_int8.npy"
+EMB_SCALE_PATH = ROOT / "cache" / "skill_embeddings_scale.npy"
 META_PATH = ROOT / "cache" / "skill_metadata.jsonl"
 
 SOCKET_PATH = os.environ.get("SUPERSKILLRET_SOCKET", "/tmp/superskillret.sock")
@@ -146,8 +148,14 @@ def make_encoder(device: str):
 
 
 def load_index():
-    logging.info("loading index from %s", EMB_PATH)
-    embeddings = np.load(EMB_PATH).astype(np.float32)
+    if EMB_INT8_PATH.exists() and EMB_SCALE_PATH.exists():
+        logging.info("loading INT8 index from %s", EMB_INT8_PATH)
+        embeddings_int8 = np.load(EMB_INT8_PATH)
+        scale = np.load(EMB_SCALE_PATH)
+        embeddings = (embeddings_int8.astype(np.float32) / 127.0) * scale
+    else:
+        logging.info("loading index from %s", EMB_PATH)
+        embeddings = np.load(EMB_PATH).astype(np.float32)
     metadata = []
     with META_PATH.open(encoding="utf-8") as f:
         for line in f:

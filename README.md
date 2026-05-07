@@ -177,14 +177,41 @@ superskillret/
 │   └── tokenizer files
 ├── skill_pool/skills.jsonl        # 16,783 skills (downloaded only on fallback build)
 └── cache/
-    ├── skill_embeddings.npy       # normalized embeddings, float16
+    ├── skill_embeddings.npy       # normalized embeddings, float32
+    ├── skill_embeddings_int8.npy  # INT8-quantized embeddings (75% smaller, optional)
+    ├── skill_embeddings_scale.npy # per-vector scale factors for INT8 dequantization
     └── skill_metadata.jsonl       # one JSON record per embedding
 ```
+
+## INT8-quantized embedding index
+
+The daemon automatically uses INT8-quantized vectors when `cache/skill_embeddings_int8.npy` and `cache/skill_embeddings_scale.npy` are present, falling back to the float32 index otherwise.
+
+| Index | Size | Memory | Quality |
+|---|---|---|---|
+| `skill_embeddings.npy` (float32) | 68.7 MB | ~400 MB loaded | baseline |
+| `skill_embeddings_int8.npy` (INT8) | 17.2 MB | ~100 MB loaded | top-10 overlap 100%, score error < 0.002 |
+
+**To generate the INT8 index** (one-time, a few seconds):
+
+```python
+import numpy as np
+from pathlib import Path
+
+CACHE = Path("~/.claude/plugins/cache/lotusroot-kim/superskillret/0.1.0/cache").expanduser()
+emb = np.load(CACHE / "skill_embeddings.npy").astype(np.float32)
+scale = np.max(np.abs(emb), axis=1, keepdims=True)
+emb_int8 = np.round(emb / (scale + 1e-12) * 127).astype(np.int8)
+np.save(CACHE / "skill_embeddings_int8.npy", emb_int8)
+np.save(CACHE / "skill_embeddings_scale.npy", scale)
+```
+
+Once both files exist, the daemon loads them automatically on next start. No config change needed.
 
 ## How retrieval works
 
 1. Each skill's `(name | description)` is encoded at build time with the SKILLRET model.
-2. Vectors stored as normalized float16 → `.npy`.
+2. Vectors stored as normalized float32 → `.npy` (or INT8 if quantized).
 3. At query time the daemon encodes `"Instruct: ... Query: <prompt>"` (the query-side prompt SKILLRET was trained with) and takes top-K by inner product.
 4. Hits below `MIN_SCORE` are dropped so irrelevant prompts don't get noise injected.
 
