@@ -34,7 +34,7 @@ SOCKET_PATH = os.environ.get("SUPERSKILLRET_SOCKET", "/tmp/superskillret.sock")
 TOP_K = int(os.environ.get("SUPERSKILLRET_TOP_K", "5"))
 MIN_SCORE = float(os.environ.get("SUPERSKILLRET_MIN_SCORE", "0.25"))
 PYTHON = os.environ.get("SUPERSKILLRET_PYTHON", sys.executable)
-SPAWN_WAIT = float(os.environ.get("SUPERSKILLRET_SPAWN_WAIT", "90"))
+SPAWN_WAIT = float(os.environ.get("SUPERSKILLRET_SPAWN_WAIT", "180"))
 DISABLED = os.environ.get("SUPERSKILLRET_DISABLE") == "1"
 
 

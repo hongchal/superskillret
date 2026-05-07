@@ -47,13 +47,14 @@ Set `SUPERSKILLRET_SKIP_PREBUILT=1` to force a local build.
 
 ### GPU users
 
-`install.sh` installs the CPU wheel. If you have CUDA, swap torch afterwards:
+By design, **superskillret runs on CPU by default** — a single 0.6B-parameter forward pass per prompt (1–3 s on a modern laptop) fits well inside Claude's own answer-generation latency and keeps your GPU free for other work. `install.sh` installs the CPU torch wheel to match.
+
+If you want GPU anyway (~0.1 s per prompt, ~3 GB VRAM resident), reinstall torch with CUDA and set the env var:
 
 ```bash
 .venv/bin/pip install --force-reinstall torch --index-url https://download.pytorch.org/whl/cu121
+export SUPERSKILLRET_DEVICE=cuda   # or "auto" to prefer GPU when available, else CPU
 ```
-
-Daemon auto-detects GPU (`SUPERSKILLRET_DEVICE=auto`). Override with `SUPERSKILLRET_DEVICE=cpu` or `cuda`.
 
 ## Alternative: direct hook in `settings.json` (no marketplace)
 
@@ -99,7 +100,7 @@ Environment variables (set in shell, hook command, or `settings.json` `env`):
 |---|---|---|
 | `SUPERSKILLRET_TOP_K` | `3` | how many skills to return |
 | `SUPERSKILLRET_MIN_SCORE` | `0.25` | drop hits below this cosine score |
-| `SUPERSKILLRET_DEVICE` | `auto` | `cpu`, `cuda`, or `auto` |
+| `SUPERSKILLRET_DEVICE` | `cpu` | `cpu`, `cuda`, or `auto` (auto prefers GPU when available) |
 | `SUPERSKILLRET_SOCKET` | `/tmp/superskillret.sock` | daemon socket |
 | `SUPERSKILLRET_PIDFILE` | `/tmp/superskillret.pid` | daemon pid file |
 | `SUPERSKILLRET_LOG` | `/tmp/superskillret.log` | daemon log file |

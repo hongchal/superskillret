@@ -10,7 +10,8 @@ Protocol (line-delimited JSON over Unix socket):
 
 Environment variables:
   SUPERSKILLRET_SOCKET    default /tmp/superskillret.sock
-  SUPERSKILLRET_DEVICE    default auto (cuda if available, else cpu)
+  SUPERSKILLRET_DEVICE    default cpu. Set to "cuda" to use GPU, or
+                          "auto" to prefer GPU when available.
   SUPERSKILLRET_MODEL     default ThakiCloud/SkillRet-Embedding-0.6B
   SUPERSKILLRET_PIDFILE   default /tmp/superskillret.pid
   SUPERSKILLRET_LOG       default /tmp/superskillret.log
@@ -36,7 +37,7 @@ SOCKET_PATH = os.environ.get("SUPERSKILLRET_SOCKET", "/tmp/superskillret.sock")
 PID_PATH = os.environ.get("SUPERSKILLRET_PIDFILE", "/tmp/superskillret.pid")
 LOG_PATH = os.environ.get("SUPERSKILLRET_LOG", "/tmp/superskillret.log")
 MODEL_NAME = os.environ.get("SUPERSKILLRET_MODEL", "ThakiCloud/SkillRet-Embedding-0.6B")
-DEVICE_ENV = os.environ.get("SUPERSKILLRET_DEVICE", "auto")
+DEVICE_ENV = os.environ.get("SUPERSKILLRET_DEVICE", "cpu")
 
 QUERY_PROMPT = (
     "Instruct: Given a skill search query, retrieve relevant skills that match the query\n"
