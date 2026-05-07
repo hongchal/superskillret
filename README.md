@@ -64,21 +64,13 @@ Bump `MIN_SCORE` if you want fewer, more relevant hits; lower it if you want mor
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `SUPERSKILLRET_SOCKET` | `/tmp/superskillret.sock` | daemon Unix socket |
-| `SUPERSKILLRET_PIDFILE` | `/tmp/superskillret.pid` | daemon pid file |
-| `SUPERSKILLRET_LOG` | `/tmp/superskillret.log` | daemon log file |
-| `SUPERSKILLRET_INSTALL_LOG` | `/tmp/superskillret-install.log` | background install log |
-| `SUPERSKILLRET_ONNX_DIR` | `<plugin>/onnx_model_int8` | directory containing `model.onnx` + tokenizer |
-| `SUPERSKILLRET_ONNX_REPO` | `youngryankim/superskillret-onnx-int8` | HF repo the encoder is fetched from |
-| `SUPERSKILLRET_INDEX_REPO` | `youngryankim/superskillret-index` | HF repo the prebuilt index is fetched from |
-| `SUPERSKILLRET_SPAWN_WAIT` | `180` | seconds the hook waits for a lazy‑spawned daemon to come up |
-| `SUPERSKILLRET_DISABLE` | unset | set to `1` to turn the hook into a no‑op |
-| `SUPERSKILLRET_BACKEND` | `onnx` | normally leave alone; the daemon auto‑falls‑back to `pytorch` if the ONNX files are missing |
+| `SUPERSKILLRET_DISABLE` | unset | set to `1` to turn the hook into a no‑op (retrieval is silently skipped) |
+| `SUPERSKILLRET_SPAWN_WAIT` | `180` | seconds the hook waits for a lazy‑spawned daemon to come up. Raise on slow networks / first‑time installs. |
 | `SUPERSKILLRET_SEEN_TRACKING` | `1` | per‑session dedup: skip skills already returned in the same Claude Code session. Set to `0` to always return the absolute top‑K. |
-| `SUPERSKILLRET_MAX_SESSIONS` | `100` | LRU cap on tracked sessions in memory |
-| `SUPERSKILLRET_OVERFETCH` | `4` | when dedup is on, fetch top‑K × this many candidates before filtering |
+| `SUPERSKILLRET_ONNX_REPO` | `youngryankim/superskillret-onnx-int8` | HF repo the encoder is fetched from. Override to use your own fine‑tuned encoder. |
+| `SUPERSKILLRET_INDEX_REPO` | `youngryankim/superskillret-index` | HF repo the prebuilt index is fetched from. Override if you publish your own skill corpus. |
 
-Variables can be set in the shell, in `~/.claude/settings.json` under `"env": {...}`, or in the hook `command` itself.
+Variables can be set in the shell, in `~/.claude/settings.json` under `"env": {...}`, or in the hook `command` itself. A handful of lower‑level knobs (socket/pid/log paths, ONNX dir override, session‑dedup internals, `BACKEND=pytorch` fallback) live in the daemon docstring if you need them.
 
 ### Forcing a re‑install / re‑fetch
 
@@ -135,8 +127,8 @@ superskillret/
 │   ├── compare_backends.py        # PyTorch vs ONNX FP32 vs INT8 parity benchmark (dev)
 │   └── smoke_test.py              # small retrieval sanity test (dev)
 ├── figure/
-│   ├── superskillret.pdf          # end‑to‑end flow diagram (source)
-│   └── superskillret.png          # same, rendered for README inline display
+│   ├── superskillret.pdf          # flow diagram source
+│   └── superskillret.png          # rendered for README inline display (300 dpi)
 ├── onnx_model_int8/               # (downloaded) model.onnx + tokenizer files
 ├── cache/                         # (downloaded) skill_embeddings(_int8|_scale).npy + metadata.jsonl
 ├── skill_pool/skills.jsonl        # (optional) full skill corpus, only needed for local index rebuild
