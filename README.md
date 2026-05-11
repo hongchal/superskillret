@@ -9,8 +9,8 @@ Built on [`ThakiCloud/SkillRet-Embedding-0.6B`](https://huggingface.co/ThakiClou
 In a Claude Code session:
 
 ```
-/plugin marketplace add lotusroot-kim/superskillret
-/plugin install superskillret@lotusroot-kim
+/plugin marketplace add ThakiCloud/SUPERSKILLRET
+/plugin install superskillret@thakicloud
 ```
 
 Then restart Claude Code (or run `/reload-plugins`). On the next `SessionStart`, a bootstrap hook spawns `scripts/install.sh` in the background. It creates a local venv, downloads the ONNX INT8 encoder and the prebuilt skill index from Hugging Face, and writes a `.installed` marker when it finishes — typically **1–2 minutes** on a reasonable connection.
@@ -270,7 +270,7 @@ Model card eval (FP32): NDCG@15 = 0.7887, Recall@10 = 0.8542. The INT8 pipeline 
 
 ## Status & roadmap
 
-Production‑ready and installed via the `lotusroot-kim` marketplace. End‑to‑end verified in a live Claude Code session. Default backend is ONNX INT8, default embedding index is INT8‑quantized, default install path (HF prebuilt fetch) takes ~45 s on a healthy connection.
+Production‑ready and installed via the `thakicloud` marketplace. End‑to‑end verified in a live Claude Code session. Default backend is ONNX INT8, default embedding index is INT8‑quantized, default install path (HF prebuilt fetch) takes ~45 s on a healthy connection.
 
 ### What's shipped
 
