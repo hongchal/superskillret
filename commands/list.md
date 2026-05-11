@@ -17,7 +17,7 @@ elif [ -n "${CLAUDE_SKILL_DIR}" ]; then
   PLUGIN_ROOT="$(dirname "${CLAUDE_SKILL_DIR}")"
 else
   echo "FAIL: cannot resolve plugin root — neither CLAUDE_PLUGIN_ROOT nor CLAUDE_SKILL_DIR is set"
-  echo "      please report at https://github.com/hongchal/superskillret/issues"
+  echo "      please report at https://github.com/ThakiCloud/SUPERSKILLRET/issues"
   exit 1
 fi
 
