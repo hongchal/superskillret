@@ -11,8 +11,8 @@
         "source": "url",
         "url": "https://github.com/hongchal/superskillret.git"
       },
-      "description": "Embedding-based skill retrieval. On every user prompt, picks the top-K relevant skills from a 16,783-skill pool (ThakiCloud/SKILLRET) and injects them as context, using the ThakiCloud/SkillRet-Embedding-0.6B encoder behind a long-running local daemon. v0.2.2: slash-command PLUGIN_ROOT/argument handling fix; /superskillret:add now resolves bare names, scans the default skill dir, and skips already-added duplicates. v0.2.1 lazy-forks install.sh. v0.2.0 added /superskillret:add.",
-      "version": "0.2.2",
+      "description": "Embedding-based skill retrieval. On every user prompt, picks the top-K relevant skills from a 16,783-skill pool (ThakiCloud/SKILLRET) and injects them as context, using the ThakiCloud/SkillRet-Embedding-0.6B encoder behind a long-running local daemon. v0.2.3: commands/add.md stops intercepting empty arguments — the CLI handles default-dir scanning. v0.2.2 added PLUGIN_ROOT fix + bare-name + dir batch + skip-dup. v0.2.1 lazy-forks install.sh. v0.2.0 added /superskillret:add.",
+      "version": "0.2.3",
       "license": "MIT",
       "keywords": ["retrieval", "skills", "embedding", "rag", "hook"],
       "homepage": "https://github.com/hongchal/superskillret"
