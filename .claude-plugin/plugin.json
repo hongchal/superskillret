@@ -1,7 +1,7 @@
 {
   "name": "superskillret",
-  "version": "0.2.9",
-  "description": "Embedding-based skill retrieval for Claude Code. On every user prompt, picks the top-K relevant skills from a 16,783-skill pool and injects them as context. v0.2.9: retrieve.py was using PEP 604 (`X | Y`) type hints which only work on Python 3.10+; many install.sh venvs end up on Python 3.9. Added `from __future__ import annotations` so all annotation evaluation is deferred to strings — fixes 'TypeError: unsupported operand type(s) for |' on import. v0.2.8 daemon health line + list/remove cli; v0.2.7 install lock cleanup; v0.2.6 daemon_client.py; v0.2.5 dedup OFF + used self-report; v0.2.0–0.2.4 custom skill registration + UX fixes.",
+  "version": "0.3.0",
+  "description": "Embedding-based skill retrieval for Claude Code. On every user prompt, picks the top-K relevant skills from a 16,783-skill pool and injects them as context. v0.3.0: slash-command PLUGIN_ROOT now uses CLAUDE_PLUGIN_ROOT first (always set in slash-command context) and falls back to dirname(CLAUDE_SKILL_DIR); fails with a clear error if neither is set. Previously CLAUDE_SKILL_DIR could be empty right after /reload-plugins, making dirname produce '.' and PLUGIN_ROOT resolve to the user's cwd — list/remove/add scripts could not be located. v0.2.9 Python 3.9 compat; v0.2.8 daemon health line + list/remove cli; v0.2.7 install lock cleanup; v0.2.6 daemon_client.py; v0.2.5 dedup OFF + used self-report; v0.2.0–0.2.4 custom skill registration.",
   "author": {
     "name": "lotusroot-kim",
     "url": "https://github.com/lotusroot-kim"
