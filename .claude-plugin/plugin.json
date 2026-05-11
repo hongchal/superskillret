@@ -1,7 +1,7 @@
 {
   "name": "superskillret",
-  "version": "0.2.1",
-  "description": "Embedding-based skill retrieval for Claude Code. On every user prompt, picks the top-K relevant skills from a 16,783-skill pool and injects them as context. v0.2.1: retrieve.py lazy-forks install.sh when bootstrap.sh didn't run (after /plugin install or /plugin update without restart). v0.2.0: Custom skill registration via /superskillret:add (+ list, remove). v0.1.1: per-session dedup + auto-bootstrap.",
+  "version": "0.2.2",
+  "description": "Embedding-based skill retrieval for Claude Code. On every user prompt, picks the top-K relevant skills from a 16,783-skill pool and injects them as context. v0.2.2: slash-command PLUGIN_ROOT fix (was using $0 which is the user's first argument, not the script path); /superskillret:add now accepts a directory or no argument (scans ~/.superskillret/skills/); duplicates are skipped instead of failing. v0.2.1: retrieve.py lazy-forks install.sh. v0.2.0: Custom skill registration.",
   "author": {
     "name": "lotusroot-kim",
     "url": "https://github.com/lotusroot-kim"

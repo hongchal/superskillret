@@ -132,9 +132,30 @@ about login, signup, or authentication.
 
 ### Register it
 
+You can pass a file path, a directory of `.md` files, a bare skill name, or nothing at all:
+
 ```
+# explicit file
 /superskillret:add ~/skills/my-auth.md
+
+# directory — batch-adds every *.md and */SKILL.md inside
+/superskillret:add ~/skills/
+
+# bare name — looked up under ~/.superskillret/skills/{name}/SKILL.md
+# or ~/.superskillret/skills/{name}.md
+/superskillret:add my-auth
+
+# no argument — scans the default user-skills directory
+# (~/.superskillret/skills/, override with SUPERSKILLRET_USER_SKILLS_DIR)
+/superskillret:add
+
+# stdin
+cat my-auth.md | /superskillret:add -
 ```
+
+**Convention**: drop your SKILL.md files in `~/.superskillret/skills/` (one per file, or one per `<name>/SKILL.md` sub-directory). After that, `/superskillret:add` with no argument picks them all up.
+
+**Duplicate handling**: re-running on a file whose `name` is already in the user pool prints `○ Skipped 'foo' — already in user pool` and does **not** count as a failure. The batch summary distinguishes added vs. skipped vs. failed. To replace an existing entry, pass `--force` (e.g. `/superskillret:add ~/skills/my-auth.md --force`).
 
 Output on success:
 ```

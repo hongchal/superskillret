@@ -24,6 +24,13 @@ from skill_validator import validate_skill_file, validate_skill_text
 
 SOCKET_PATH = os.environ.get("SUPERSKILLRET_SOCKET", "/tmp/superskillret.sock")
 
+# Convention: users keep their personal skills here so `/superskillret:add`
+# with no argument can pick them all up automatically.
+DEFAULT_SKILL_DIR = Path(
+    os.environ.get("SUPERSKILLRET_USER_SKILLS_DIR",
+                   str(Path.home() / ".superskillret" / "skills"))
+).expanduser()
+
 
 def daemon_request(req: dict, timeout: float = 30.0) -> dict:
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -51,85 +58,80 @@ def daemon_request(req: dict, timeout: float = 30.0) -> dict:
         s.close()
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(
-        description="Add a SKILL.md to the superskillret retrieval index."
-    )
-    ap.add_argument(
-        "path",
-        help="Path to SKILL.md (use '-' to read from stdin)",
-    )
-    ap.add_argument(
-        "--force",
-        action="store_true",
-        help="Overwrite an existing skill with the same name",
-    )
-    ap.add_argument(
-        "--json",
-        action="store_true",
-        help="Emit JSON instead of human-readable text",
-    )
-    args = ap.parse_args()
-
-    # 1. Local validation
-    if args.path == "-":
+def _process_one(path_or_stdin: str, force: bool, json_out: bool) -> int:
+    """Validate + add a single SKILL.md (or stdin). Returns 0 on success."""
+    if path_or_stdin == "-":
         text = sys.stdin.read()
         result = validate_skill_text(text, source="<stdin>")
+        source_label = "<stdin>"
     else:
-        result = validate_skill_file(Path(args.path).expanduser())
+        p = Path(path_or_stdin).expanduser().resolve()
+        result = validate_skill_file(p)
+        source_label = str(p)
 
     if not result.valid:
-        if args.json:
+        if json_out:
             print(json.dumps({"ok": False, "stage": "validation",
+                              "path": source_label,
                               "errors": result.errors,
-                              "warnings": result.warnings}, indent=2))
+                              "warnings": result.warnings},
+                             ensure_ascii=False))
         else:
-            print(f"✗ Validation failed for {args.path}")
+            print(f"✗ {source_label}")
             for e in result.errors:
                 print(f"    ERR: {e}")
             for w in result.warnings:
                 print(f"    WARN: {w}")
         return 1
 
-    # 2. Daemon round-trip
     try:
         reply = daemon_request({
             "op": "add_skill",
             "name": result.name,
             "description": result.description,
             "body": result.body,
-            "force": args.force,
-            "source": str(Path(args.path).expanduser())
-                if args.path != "-" else "<stdin>",
+            "force": force,
+            "source": source_label,
         }, timeout=60.0)
     except Exception as e:
-        if args.json:
+        if json_out:
             print(json.dumps({"ok": False, "stage": "daemon",
-                              "error": str(e)}, indent=2))
+                              "path": source_label,
+                              "error": str(e)}, ensure_ascii=False))
         else:
-            print(f"✗ Daemon error: {e}")
+            print(f"✗ {source_label}")
+            print(f"    daemon error: {e}")
         return 1
 
     if not reply.get("ok"):
-        if args.json:
-            print(json.dumps({"ok": False, "stage": "daemon", **reply},
-                             indent=2))
+        # Skip-with-notice when the skill is already in the user pool — this
+        # is the common case for re-running batch adds and shouldn't count
+        # as a hard failure. Caller distinguishes via the return code.
+        if reply.get("reason") == "duplicate":
+            if json_out:
+                print(json.dumps({"ok": True, "skipped": True, "reason": "duplicate",
+                                  "path": source_label, "name": result.name},
+                                 ensure_ascii=False))
+            else:
+                print(f"○ Skipped '{result.name}' — already in user pool "
+                      f"(row {reply.get('existing_global_row')})  ({source_label})")
+            return 2  # 2 = skipped (not 0=added, not 1=error)
+        if json_out:
+            print(json.dumps({"ok": False, "stage": "daemon",
+                              "path": source_label,
+                              **reply}, ensure_ascii=False))
         else:
-            print(f"✗ Daemon refused: {reply.get('error', reply)}")
+            print(f"✗ {source_label}")
+            print(f"    daemon refused: {reply.get('error', reply)}")
         return 1
 
-    # 3. Human summary
-    if args.json:
-        out = {
-            "ok": True,
-            "name": result.name,
-            "warnings": result.warnings,
-            **reply,
-        }
-        print(json.dumps(out, indent=2, ensure_ascii=False))
+    if json_out:
+        out = {"ok": True, "path": source_label, "name": result.name,
+               "warnings": result.warnings, **reply}
+        print(json.dumps(out, ensure_ascii=False))
         return 0
 
-    print(f"✓ Added '{result.name}' to superskillret")
+    print(f"✓ Added '{result.name}'  ({source_label})")
     print(f"    user-pool row: {reply.get('user_row_index')}")
     print(f"    global row:    {reply.get('global_row_index')}")
     print(f"    encode time:   {reply.get('encode_ms', 0):.0f} ms")
@@ -137,9 +139,9 @@ def main() -> int:
     quality = reply.get("quality") or {}
     near_name = quality.get("nearest_existing_name")
     near_sim = quality.get("nearest_existing_score")
-    if near_name is not None:
+    if near_name is not None and near_sim is not None:
         flag = " ← near-duplicate, consider editing instead" \
-            if (near_sim or 0) > 0.85 else ""
+            if near_sim > 0.85 else ""
         print(f"    nearest existing: {near_name} ({near_sim:.3f}){flag}")
     self_score = quality.get("self_retrieval_score")
     if self_score is not None:
@@ -152,6 +154,131 @@ def main() -> int:
         print(f"    WARN: {w}")
 
     return 0
+
+
+def _resolve_arg(raw: str) -> tuple[Path | None, str]:
+    """Map a user-supplied argument to a real filesystem path.
+
+    Resolution order:
+      1. If raw looks like a path (contains '/' or '~' or '.', or exists) →
+         expand and use as-is.
+      2. Otherwise treat as a bare skill name. Try
+         DEFAULT_SKILL_DIR/<name>/SKILL.md, then DEFAULT_SKILL_DIR/<name>.md.
+
+    Returns (resolved_path, mode) where mode is "file", "dir", or "missing".
+    """
+    p = Path(raw).expanduser()
+    if "/" in raw or raw.startswith(("~", ".")) or p.exists():
+        if not p.exists():
+            return p, "missing"
+        return p, ("dir" if p.is_dir() else "file")
+
+    # Bare name → check well-known layout under DEFAULT_SKILL_DIR.
+    candidate_dir = DEFAULT_SKILL_DIR / raw / "SKILL.md"
+    if candidate_dir.exists():
+        return candidate_dir, "file"
+    candidate_flat = DEFAULT_SKILL_DIR / f"{raw}.md"
+    if candidate_flat.exists():
+        return candidate_flat, "file"
+    return DEFAULT_SKILL_DIR / raw, "missing"
+
+
+def _batch_add(md_files: list[Path], force: bool, json_out: bool) -> int:
+    added = skipped = failed = 0
+    if not json_out and md_files:
+        print(f"Adding {len(md_files)} skill file(s)...")
+        print()
+    for md in md_files:
+        rc = _process_one(str(md), force, json_out)
+        if rc == 0:
+            added += 1
+        elif rc == 2:
+            skipped += 1
+        else:
+            failed += 1
+        if not json_out:
+            print()
+    if not json_out:
+        parts = [f"{added} added"]
+        if skipped:
+            parts.append(f"{skipped} skipped (already in pool)")
+        if failed:
+            parts.append(f"{failed} failed")
+        print(f"Batch done: {', '.join(parts)} of {len(md_files)} total")
+    return 0 if failed == 0 else 1
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description="Add a SKILL.md to superskillret.\n\n"
+                    "Resolution:\n"
+                    "  no arg              → scan {DEFAULT}/*.md (and */SKILL.md)\n"
+                    "  bare name           → look up under {DEFAULT}\n"
+                    "  path to file        → add that file\n"
+                    "  path to directory   → batch-add all *.md inside\n"
+                    "  '-'                 → read SKILL.md from stdin".replace(
+                        "{DEFAULT}", str(DEFAULT_SKILL_DIR)
+                    ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ap.add_argument(
+        "path",
+        nargs="?",
+        default=None,
+        help="path / name / '-' (omit to scan the default skill directory)",
+    )
+    ap.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite a user-pool entry with the same name instead of skipping",
+    )
+    ap.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit JSON instead of human-readable text",
+    )
+    args = ap.parse_args()
+
+    # Case 1: no argument → scan the default user-skills directory.
+    if not args.path:
+        if not DEFAULT_SKILL_DIR.exists():
+            msg = (f"default skill directory does not exist yet: "
+                   f"{DEFAULT_SKILL_DIR}\n"
+                   f"Create it and drop SKILL.md files in, or pass an explicit path.")
+            print(json.dumps({"ok": False, "error": msg}) if args.json else f"✗ {msg}")
+            return 1
+        md_files: list[Path] = sorted(DEFAULT_SKILL_DIR.glob("*.md"))
+        md_files += sorted(DEFAULT_SKILL_DIR.glob("*/SKILL.md"))
+        if not md_files:
+            msg = f"no *.md files under {DEFAULT_SKILL_DIR}"
+            print(json.dumps({"ok": False, "error": msg}) if args.json else f"✗ {msg}")
+            return 1
+        return _batch_add(md_files, args.force, args.json)
+
+    # Case 2: stdin.
+    if args.path == "-":
+        return _process_one("-", args.force, args.json)
+
+    # Case 3: path or bare name.
+    resolved, mode = _resolve_arg(args.path)
+
+    if mode == "missing":
+        msg = (f"could not find a SKILL.md for {args.path!r}\n"
+               f"Looked at: {resolved}")
+        print(json.dumps({"ok": False, "error": msg}) if args.json else f"✗ {msg}")
+        return 1
+
+    if mode == "file":
+        return _process_one(str(resolved), args.force, args.json)
+
+    # mode == "dir"
+    md_files = sorted(resolved.glob("*.md"))
+    md_files += sorted(resolved.glob("*/SKILL.md"))
+    if not md_files:
+        msg = f"no *.md files in directory: {resolved}"
+        print(json.dumps({"ok": False, "error": msg}) if args.json else f"✗ {msg}")
+        return 1
+    return _batch_add(md_files, args.force, args.json)
 
 
 if __name__ == "__main__":
