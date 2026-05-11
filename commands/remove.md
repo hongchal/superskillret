@@ -21,31 +21,7 @@ if [ -z "$ARGUMENTS" ]; then
   exit 0
 fi
 
-PLUGIN_ROOT="$PLUGIN_ROOT" "$PY" - "$ARGUMENTS" <<'PYEOF'
-import os
-import sys
-sys.path.insert(0, os.path.join(os.environ["PLUGIN_ROOT"], "scripts"))
-
-name = sys.argv[1].strip()
-
-try:
-    from daemon_client import daemon_request
-except ImportError as e:
-    print(f"FAIL: cannot import daemon_client ({e}); is the plugin venv set up?")
-    sys.exit(1)
-
-try:
-    reply = daemon_request({"op": "remove_user_skill", "name": name})
-except Exception as e:
-    print(f"FAIL: {e}")
-    sys.exit(1)
-
-if reply.get("ok"):
-    print(f"removed '{name}' (was at user-pool row {reply.get('removed_row')})")
-else:
-    print(f"FAIL: {reply.get('error', reply)}")
-    sys.exit(1)
-PYEOF
+eval "$PY \"$PLUGIN_ROOT/scripts/remove_skill_cli.py\" $ARGUMENTS"
 ```
 
 Confirm to the user whether the removal succeeded and remind them to use `/superskillret:list` to verify.

@@ -1,7 +1,7 @@
 {
   "name": "superskillret",
-  "version": "0.2.7",
-  "description": "Embedding-based skill retrieval for Claude Code. On every user prompt, picks the top-K relevant skills from a 16,783-skill pool and injects them as context. v0.2.7: install.sh now clears its own install lock on exit and retrieve.py treats .installed as authoritative (lock state can be stale due to PID re-use); wait notice shows the last few install.log lines so users without a side terminal can see actual progress. v0.2.6 extracted daemon_client.py shared by /add /list /remove. v0.2.5 dedup default OFF + retrieved-vs-used self-report. v0.2.4 daemon lazy-spawn for /add. v0.2.0–0.2.3 custom skill registration + UX fixes.",
+  "version": "0.2.8",
+  "description": "Embedding-based skill retrieval for Claude Code. On every user prompt, picks the top-K relevant skills from a 16,783-skill pool and injects them as context. v0.2.8: /list and /remove move to dedicated cli scripts (avoids inline-heredoc env-var fragility that left them stuck on 'no module named daemon_client'); retrieve.py now shows daemon health on every emit ('daemon: ready (N skills, Xs)' or 'daemon: cold start') so users see whether retrieval actually fired. v0.2.7 install lock cleanup + log tail; v0.2.6 daemon_client.py; v0.2.5 dedup OFF + used self-report; v0.2.0–0.2.4 custom skill registration + UX fixes.",
   "author": {
     "name": "lotusroot-kim",
     "url": "https://github.com/lotusroot-kim"
