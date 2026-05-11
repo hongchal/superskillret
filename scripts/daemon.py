@@ -497,7 +497,17 @@ class RetrievalServer:
                 return
             req = json.loads(data.decode("utf-8"))
             if req.get("op") == "ping":
-                conn.sendall(b'{"ok": true}\n')
+                # Return some health info too so retrieve.py can surface
+                # daemon readiness in the answer framing.
+                reply = {
+                    "ok": True,
+                    "n_skills": len(self.metadata),
+                    "system_count": self.system_count,
+                    "user_count": max(0, len(self.metadata) - self.system_count),
+                    "embed_dim": self.embed_dim,
+                    "backend": "onnx" if isinstance(self.encoder, ONNXEncoder) else "pytorch",
+                }
+                conn.sendall((json.dumps(reply) + "\n").encode("utf-8"))
                 return
             if req.get("op") == "reset_session":
                 sid = req.get("session_id", "")

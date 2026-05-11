@@ -54,15 +54,21 @@ def connect(timeout: float = 2.0):
     return sock
 
 
-def ping() -> bool:
+def ping() -> dict | None:
+    """Return the daemon's health dict if reachable, else None.
+
+    The daemon's ping response since v0.2.8 contains
+    {ok, n_skills, system_count, user_count, embed_dim, backend}.
+    """
     try:
         s = connect(timeout=1.0)
         s.sendall(b'{"op": "ping"}\n')
-        reply = s.recv(1024)
+        reply = s.recv(2048)
         s.close()
-        return b'"ok"' in reply
+        info = json.loads(reply.decode("utf-8"))
+        return info if info.get("ok") else None
     except Exception:
-        return False
+        return None
 
 
 def spawn_daemon():
@@ -77,13 +83,16 @@ def spawn_daemon():
     )
 
 
-def wait_for_daemon(timeout: float):
+def wait_for_daemon(timeout: float) -> dict | None:
+    """Poll ping() until the daemon is up. Returns health dict on success,
+    None on timeout."""
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if ping():
-            return True
+        info = ping()
+        if info is not None:
+            return info
         time.sleep(0.3)
-    return False
+    return None
 
 
 def query_daemon(prompt: str, top_k: int, min_score: float, session_id: str = "") -> dict:
@@ -109,18 +118,37 @@ def query_daemon(prompt: str, top_k: int, min_score: float, session_id: str = ""
         s.close()
 
 
-def format_context(hits: list) -> str:
+def _daemon_health_line(health: dict | None, latency_s: float | None = None) -> str:
+    """One human-readable line summarising daemon state for the user."""
+    if health is None:
+        return "_daemon: not reachable_"
+    n_total = health.get("n_skills", 0)
+    n_sys = health.get("system_count", 0)
+    n_user = health.get("user_count", 0)
+    backend = health.get("backend", "?")
+    lat = f", {latency_s*1000:.0f} ms" if latency_s is not None else ""
+    return (
+        f"_daemon: ready ({n_total} skills = {n_sys} system + {n_user} user, "
+        f"backend={backend}{lat})_"
+    )
+
+
+def format_context(hits: list, health: dict | None = None,
+                    latency_s: float | None = None) -> str:
     if not hits:
         return ""
     summary = ", ".join(
         f"`{h.get('name','?')}` ({h.get('score',0):.2f})" for h in hits
     )
     names_csv = ", ".join(f"`{h.get('name','?')}`" for h in hits)
+    health_line = _daemon_health_line(health, latency_s)
     lines = [
         f"**superskillret retrieved top-{len(hits)}:** {summary}",
+        f"_{health_line.strip('_')}_",
         "",
-        "Begin your response with a one-line notice naming the skills retrieved:",
+        "Begin your response with two one-line notices: first the retrieved skills, then the daemon health line below.",
         f"> _superskillret retrieved: {summary}_",
+        f"> {health_line}",
         "",
         "Use the skills below as authoritative reference material for the user's request when relevant.",
         "",
@@ -315,30 +343,54 @@ def main():
         emit(_install_wait_message())
         return
 
-    if not ping():
+    # Daemon ping returns the health dict on success, None otherwise.
+    health = ping()
+    if health is None:
         spawn_daemon()
-        if not wait_for_daemon(SPAWN_WAIT):
-            sys.stderr.write("superskillret: daemon failed to start in time\n")
-            emit("")
+        # Quick wait for visibility — if the daemon is doing a true cold
+        # start (ONNX encoder load + index load = ~15-30s), we surface a
+        # cold-start notice instead of silently blocking the CC hook.
+        quick = float(os.environ.get("SUPERSKILLRET_QUICK_WAIT", "5"))
+        health = wait_for_daemon(quick)
+        if health is None:
+            sys.stderr.write(
+                f"superskillret: daemon cold-start in progress (>{quick:.0f}s); "
+                "skipping retrieval this turn — should be ready next prompt\n"
+            )
+            emit(
+                "> _superskillret: daemon cold-start in progress "
+                f"(ONNX encoder + index loading, ~15–30 s). Retrieval will be "
+                f"available on the next prompt. Follow `tail -f /tmp/superskillret.log` "
+                f"for progress._\n"
+            )
             return
 
     try:
         result = query_daemon(prompt, TOP_K, MIN_SCORE, session_id=session_id)
     except Exception as e:
         sys.stderr.write(f"superskillret: query failed: {e}\n")
-        emit("")
+        emit(f"> _superskillret: query failed ({e})_\n")
         return
 
     if result.get("error"):
         sys.stderr.write(f"superskillret: daemon error: {result['error']}\n")
-        emit("")
+        emit(f"> _superskillret: daemon error ({result['error']})_\n")
         return
 
     hits = result.get("hits", [])
     skipped_seen = int(result.get("skipped_seen", 0))
-    context = format_context(hits)
     latency = result.get("latency_s", 0)
-    if context:
+    context = format_context(hits, health=health, latency_s=latency)
+
+    # When there are zero hits, the framing returns empty; still surface a
+    # daemon-status notice so the user can see retrieval was attempted.
+    if not context:
+        context = (
+            f"> {_daemon_health_line(health, latency)}\n"
+            f"> _superskillret: no skills above MIN_SCORE={MIN_SCORE:.2f} matched_\n"
+        )
+
+    if hits:
         dedup_note = f", {skipped_seen} skipped (already seen this session)" if skipped_seen else ""
         context += f"\n<!-- superskillret: {len(hits)} hit(s){dedup_note}, {latency:.2f}s -->\n"
 
