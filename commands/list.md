@@ -7,11 +7,11 @@ disable-model-invocation: true
 ## List user-added superskillret skills
 
 ```!
-PLUGIN_ROOT="$(dirname "$(dirname "$0")")"
+PLUGIN_ROOT="$(dirname "${CLAUDE_SKILL_DIR}")"
 PY="$PLUGIN_ROOT/.venv/bin/python"
 if [ ! -x "$PY" ]; then PY="$(command -v python3)"; fi
 
-"$PY" - <<PYEOF
+"$PY" - <<'PYEOF'
 import json
 import socket
 import sys
@@ -39,7 +39,7 @@ def call(req):
 reply = call({"op": "list_user_skills"})
 skills = reply.get("skills", [])
 if not skills:
-    print("no user-added skills yet — use /superskillret:add <path> to register one")
+    print("no user-added skills yet - use /superskillret:add <path> to register one")
 else:
     print(f"{len(skills)} user-added skill(s):")
     print()
@@ -48,7 +48,7 @@ else:
         desc = (s.get("description") or "").strip().replace("\n", " ")
         if len(desc) > 80: desc = desc[:77] + "..."
         body_kb = len((s.get("body") or "").encode("utf-8")) / 1024
-        print(f"  • {name}")
+        print(f"  - {name}")
         print(f"      {desc}")
         print(f"      (body: {body_kb:.1f} KB)")
 PYEOF

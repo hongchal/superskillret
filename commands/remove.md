@@ -2,6 +2,7 @@
 name: remove
 description: Remove a user-added skill from the superskillret index by name. Use when the user no longer wants a previously-registered skill to be retrievable, or wants to replace it with an updated version (remove + re-add). Does NOT affect the 16,783 system skills.
 disable-model-invocation: true
+argument-hint: <skill-name>
 ---
 
 ## Remove a user-added superskillret skill
@@ -9,18 +10,20 @@ disable-model-invocation: true
 Argument expected: the skill `name` (the kebab-case frontmatter name, not the file path).
 
 ```!
-PLUGIN_ROOT="$(dirname "$(dirname "$0")")"
+PLUGIN_ROOT="$(dirname "${CLAUDE_SKILL_DIR}")"
 PY="$PLUGIN_ROOT/.venv/bin/python"
 if [ ! -x "$PY" ]; then PY="$(command -v python3)"; fi
 
-if [ -z "$ARGUMENTS" ]; then
+ARGS="$ARGUMENTS"
+
+if [ -z "$ARGS" ]; then
   echo "Usage: /superskillret:remove <name>"
   echo ""
   echo "Use /superskillret:list to see registered names."
-  exit 1
+  exit 0
 fi
 
-"$PY" - "$ARGUMENTS" <<'PYEOF'
+"$PY" - "$ARGS" <<'PYEOF'
 import json, socket, sys
 name = sys.argv[1].strip()
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.settimeout(15.0)
@@ -38,9 +41,9 @@ while True:
 s.close()
 reply = json.loads(buf.decode())
 if reply.get("ok"):
-    print(f"✓ removed '{name}' (was at user-pool row {reply.get('removed_row')})")
+    print(f"removed '{name}' (was at user-pool row {reply.get('removed_row')})")
 else:
-    print(f"✗ {reply.get('error', reply)}")
+    print(f"FAIL: {reply.get('error', reply)}")
     sys.exit(1)
 PYEOF
 ```

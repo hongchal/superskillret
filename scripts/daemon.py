@@ -369,11 +369,14 @@ class RetrievalServer:
 
             if existing_global is not None and existing_global < self.system_count:
                 return {"ok": False,
+                        "reason": "system_collision",
                         "error": f"name '{name}' collides with a system skill"
                                  f" at row {existing_global}; pick a different name"}
 
             if existing_global is not None and not force:
                 return {"ok": False,
+                        "reason": "duplicate",
+                        "existing_global_row": existing_global,
                         "error": f"name '{name}' already in user pool at row "
                                  f"{existing_global}; pass force=true to overwrite"}
 
