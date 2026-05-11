@@ -13,7 +13,9 @@ import argparse
 import json
 import os
 import socket
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -23,6 +25,10 @@ from skill_validator import validate_skill_file, validate_skill_text
 
 
 SOCKET_PATH = os.environ.get("SUPERSKILLRET_SOCKET", "/tmp/superskillret.sock")
+DAEMON_LOG = os.environ.get("SUPERSKILLRET_LOG", "/tmp/superskillret.log")
+DAEMON_SCRIPT = ROOT / "scripts" / "daemon.py"
+VENV_PYTHON = ROOT / ".venv" / "bin" / "python"
+DAEMON_SPAWN_WAIT = float(os.environ.get("SUPERSKILLRET_SPAWN_WAIT", "60"))
 
 # Convention: users keep their personal skills here so `/superskillret:add`
 # with no argument can pick them all up automatically.
@@ -32,16 +38,75 @@ DEFAULT_SKILL_DIR = Path(
 ).expanduser()
 
 
+def _ping_daemon(timeout: float = 1.0) -> bool:
+    """True iff the daemon is listening on SOCKET_PATH and responds to ping."""
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect(SOCKET_PATH)
+        s.sendall(b'{"op": "ping"}\n')
+        reply = s.recv(1024)
+        s.close()
+        return b'"ok"' in reply
+    except Exception:
+        return False
+
+
+def _spawn_daemon() -> None:
+    """Lazy-fork the retrieval daemon in the background.
+
+    Mirrors retrieve.py's `spawn_daemon()` so slash commands work even when
+    no UserPromptSubmit hook has fired yet (e.g. right after /reload-plugins
+    or /plugin update). Uses the plugin venv python when available.
+    """
+    py = str(VENV_PYTHON) if VENV_PYTHON.exists() else sys.executable
+    log = open(DAEMON_LOG, "a")
+    subprocess.Popen(
+        [py, str(DAEMON_SCRIPT)],
+        stdout=log,
+        stderr=log,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+        env={**os.environ},
+    )
+
+
+def _ensure_daemon(spawn_wait: float = DAEMON_SPAWN_WAIT) -> None:
+    """Ensure the daemon is reachable, spawning it if not. Raises on failure."""
+    if _ping_daemon():
+        return
+    if not DAEMON_SCRIPT.exists():
+        raise RuntimeError(
+            f"daemon script not found at {DAEMON_SCRIPT}; "
+            "is this the plugin install dir?"
+        )
+    if not VENV_PYTHON.exists():
+        raise RuntimeError(
+            f"venv python not found at {VENV_PYTHON}; "
+            "run scripts/install.sh first or send any user prompt to "
+            "Claude Code so the SessionStart bootstrap can set it up"
+        )
+    _spawn_daemon()
+    deadline = time.time() + spawn_wait
+    while time.time() < deadline:
+        if _ping_daemon():
+            return
+        time.sleep(0.3)
+    raise RuntimeError(
+        f"daemon spawned but never came up in {spawn_wait:.0f}s — "
+        f"check {DAEMON_LOG} for tracebacks"
+    )
+
+
 def daemon_request(req: dict, timeout: float = 30.0) -> dict:
+    _ensure_daemon()
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(timeout)
     try:
         s.connect(SOCKET_PATH)
     except (FileNotFoundError, ConnectionRefusedError) as e:
         raise RuntimeError(
-            f"daemon not reachable at {SOCKET_PATH}; send any user prompt to "
-            "Claude Code first (the UserPromptSubmit hook will lazy-spawn it) "
-            f"or run scripts/install.sh if not yet installed [{e}]"
+            f"daemon connect failed at {SOCKET_PATH} even after spawn: {e}"
         )
     try:
         s.sendall((json.dumps(req) + "\n").encode("utf-8"))

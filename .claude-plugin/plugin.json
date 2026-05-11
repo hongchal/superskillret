@@ -1,6 +1,6 @@
 {
   "name": "superskillret",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Embedding-based skill retrieval for Claude Code. On every user prompt, picks the top-K relevant skills from a 16,783-skill pool and injects them as context. v0.2.3: commands/add.md no longer short-circuits on empty arguments — the CLI handles the default-directory scan itself, so `/superskillret:add` with no argument now works as intended. v0.2.2: slash-command PLUGIN_ROOT fix; bare name + default-dir + directory batch + skip-duplicates. v0.2.1: retrieve.py lazy-forks install.sh. v0.2.0: Custom skill registration.",
   "author": {
     "name": "lotusroot-kim",
