@@ -10,7 +10,20 @@ argument-hint: <skill-name>
 Argument expected: the skill `name` (the kebab-case frontmatter name, not the file path).
 
 ```!
-PLUGIN_ROOT="$(dirname "${CLAUDE_SKILL_DIR}")"
+if [ -n "${CLAUDE_PLUGIN_ROOT}" ]; then
+  PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT}"
+elif [ -n "${CLAUDE_SKILL_DIR}" ]; then
+  PLUGIN_ROOT="$(dirname "${CLAUDE_SKILL_DIR}")"
+else
+  echo "FAIL: cannot resolve plugin root — neither CLAUDE_PLUGIN_ROOT nor CLAUDE_SKILL_DIR is set"
+  exit 1
+fi
+
+if [ ! -d "$PLUGIN_ROOT/scripts" ]; then
+  echo "FAIL: $PLUGIN_ROOT/scripts not found"
+  exit 1
+fi
+
 PY="$PLUGIN_ROOT/.venv/bin/python"
 if [ ! -x "$PY" ]; then PY="$(command -v python3)"; fi
 

@@ -18,15 +18,23 @@ Resolution order (handled inside `add_skill_cli.py`):
 Override the default location with `SUPERSKILLRET_USER_SKILLS_DIR`.
 
 ```!
-# `${CLAUDE_SKILL_DIR}` is the directory of the active command file
-# (<plugin>/commands/add.md), so the plugin root is one directory up.
-PLUGIN_ROOT="$(dirname "${CLAUDE_SKILL_DIR}")"
+if [ -n "${CLAUDE_PLUGIN_ROOT}" ]; then
+  PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT}"
+elif [ -n "${CLAUDE_SKILL_DIR}" ]; then
+  PLUGIN_ROOT="$(dirname "${CLAUDE_SKILL_DIR}")"
+else
+  echo "FAIL: cannot resolve plugin root — neither CLAUDE_PLUGIN_ROOT nor CLAUDE_SKILL_DIR is set"
+  exit 1
+fi
+
+if [ ! -d "$PLUGIN_ROOT/scripts" ]; then
+  echo "FAIL: $PLUGIN_ROOT/scripts not found"
+  exit 1
+fi
+
 PY="$PLUGIN_ROOT/.venv/bin/python"
 if [ ! -x "$PY" ]; then PY="$(command -v python3)"; fi
 
-# Hand the argument string straight to the CLI. We use `eval` so the shell
-# expands "~" and any globs from the user's argument before exec.
-# When `$ARGUMENTS` is empty the CLI scans the default location.
 eval "$PY \"$PLUGIN_ROOT/scripts/add_skill_cli.py\" $ARGUMENTS"
 ```
 
