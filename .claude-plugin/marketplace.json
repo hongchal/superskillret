@@ -11,8 +11,8 @@
         "source": "url",
         "url": "https://github.com/hongchal/superskillret.git"
       },
-      "description": "Embedding-based skill retrieval. On every user prompt, picks the top-K relevant skills from a 16,783-skill pool (ThakiCloud/SKILLRET) and injects them as context, using the ThakiCloud/SkillRet-Embedding-0.6B encoder behind a long-running local daemon. v0.2.0 adds /superskillret:add to register custom skills (validated and stored in a separate user-pool that survives system index upgrades).",
-      "version": "0.2.0",
+      "description": "Embedding-based skill retrieval. On every user prompt, picks the top-K relevant skills from a 16,783-skill pool (ThakiCloud/SKILLRET) and injects them as context, using the ThakiCloud/SkillRet-Embedding-0.6B encoder behind a long-running local daemon. v0.2.1 fixes a UX bug where /plugin install / /plugin update without a fresh CC session left install.sh un-run forever; retrieve.py now lazy-forks it. v0.2.0 added /superskillret:add to register custom skills.",
+      "version": "0.2.1",
       "license": "MIT",
       "keywords": ["retrieval", "skills", "embedding", "rag", "hook"],
       "homepage": "https://github.com/hongchal/superskillret"

@@ -29,6 +29,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DAEMON_SCRIPT = ROOT / "scripts" / "daemon.py"
+INSTALL_SCRIPT = ROOT / "scripts" / "install.sh"
 VENV_PYTHON = ROOT / ".venv" / "bin" / "python"
 INSTALL_LOCK = Path(os.environ.get("SUPERSKILLRET_INSTALL_LOCK", "/tmp/superskillret-install.lock"))
 INSTALL_DONE = ROOT / ".installed"
@@ -165,6 +166,41 @@ def _is_installing() -> bool:
         return False
 
 
+def _trigger_install() -> bool:
+    """Lazy-fork install.sh from the hook when bootstrap.sh hasn't run yet.
+
+    Happens after `/plugin install` / `/plugin update` without a fresh CC
+    session — SessionStart wasn't fired, so the user would otherwise be
+    stuck on the "not yet installed" notice forever. We record the spawned
+    PID into INSTALL_LOCK so subsequent prompts route to the "still
+    installing" wait message instead of double-forking.
+    """
+    if not INSTALL_SCRIPT.exists():
+        return False
+    try:
+        log = open(INSTALL_LOG, "a")
+        proc = subprocess.Popen(
+            ["bash", str(INSTALL_SCRIPT)],
+            stdout=log,
+            stderr=log,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+            env={**os.environ},
+        )
+        try:
+            INSTALL_LOCK.write_text(str(proc.pid))
+        except Exception:
+            pass
+        sys.stderr.write(
+            f"superskillret: lazy-spawned install.sh (pid {proc.pid}) — "
+            f"tail {INSTALL_LOG} for progress\n"
+        )
+        return True
+    except Exception as e:
+        sys.stderr.write(f"superskillret: lazy-spawn failed: {e}\n")
+        return False
+
+
 def _install_wait_message() -> str:
     return (
         "> **superskillret: first-time setup is still running in the background.**\n"
@@ -220,10 +256,15 @@ def main():
         emit(_install_wait_message())
         return
 
-    # No venv? Bootstrap didn't run, or the user installed without SessionStart.
-    # Emit a gentle instruction instead of exploding.
+    # No venv yet — bootstrap.sh may not have run (e.g. /plugin install or
+    # /plugin update without a fresh CC session, so SessionStart never
+    # fired). Lazy-fork install.sh ourselves so the user doesn't have to
+    # restart Claude Code. Re-check _is_installing() afterward so we still
+    # show the wait notice instead of trying to spawn the daemon yet.
     if not VENV_PYTHON.exists() and not INSTALL_DONE.exists():
-        emit(_install_missing_message())
+        if not _is_installing():
+            _trigger_install()
+        emit(_install_wait_message())
         return
 
     if not ping():
