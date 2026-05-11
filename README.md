@@ -103,6 +103,86 @@ You don't interact with superskillret directly — it just runs on every user pr
 | `/superskillret:status` | daemon pid, socket state, last 20 log lines |
 | `/superskillret:stop` | kill the daemon; it lazy‑starts again on the next prompt |
 | `/superskillret:reset` | clear the per‑session "already seen" skill memory so the next prompt can surface any skill again |
+| `/superskillret:add <path>` | validate a SKILL.md and add it to the index (v0.2.0). Stored in a writable user pool that survives system index upgrades. See [Adding custom skills](#adding-custom-skills) below. |
+| `/superskillret:list` | list all user‑added skills (the 16,783 system skills are not shown — too many) |
+| `/superskillret:remove <name>` | remove a user‑added skill by name. Does not touch system skills |
+
+## Adding custom skills
+
+Since v0.2.0 you can register your own SKILL.md files into the retrieval index without rebuilding the entire embedding cache.
+
+### Skill file format
+
+A SKILL.md needs YAML frontmatter with `name` and `description`, then a body. Example (`~/skills/my-auth.md`):
+
+```markdown
+---
+name: my-auth
+description: Use when the user needs to implement email/social login with JWT tokens. Covers signup, signin, refresh flow, and RBAC.
+---
+
+# my-auth
+
+You MUST follow the JWT-based session flow described below when the user asks
+about login, signup, or authentication.
+
+1. Issue access token (15 min) + refresh token (7 days).
+2. ...
+```
+
+### Register it
+
+```
+/superskillret:add ~/skills/my-auth.md
+```
+
+Output on success:
+```
+✓ Added 'my-auth' to superskillret
+    user-pool row: 0
+    global row:    16783
+    encode time:   75 ms
+    nearest existing: auth-skill (0.43) — distinct
+    self-retrieval:   0.94
+```
+
+### Validation rules
+
+The validator blocks the add if any of these fail:
+
+| Rule | Limit |
+|---|---|
+| File must be valid UTF‑8 | ≤ 1 MB |
+| Frontmatter delimiters | `---` open and close |
+| Required fields | `name`, `description` |
+| `name` shape | `^[a-z0-9][a-z0-9-]{1,63}$` (kebab‑case, 2–64 chars) |
+| `description` length | 20 – 500 chars |
+| `body` length | ≥ 100 chars (warning if > 50 KB) |
+| Security | no known prompt‑injection patterns (e.g. "ignore previous instructions", `<system>` tags) |
+| Name uniqueness | rejected if already in the corpus; `--force` to overwrite a user‑pool entry |
+
+Quality checks are reported but **do not block** (they're advisory):
+
+- **Self‑retrieval score**: encode the description as a query and measure its cosine with the new skill vector. Healthy descriptions land around 0.7–0.9; below 0.6 suggests the description is too generic.
+- **Nearest existing**: cosine to the closest already-indexed skill. Above 0.85 means you have a near‑duplicate of an existing skill — consider editing that one instead.
+
+### User pool vs system index
+
+User‑added skills are stored separately:
+
+```
+cache/
+├── skill_embeddings.npy          ← system (16,783 skills, refreshed by install.sh)
+├── skill_metadata.jsonl          ← system
+├── user_skill_embeddings.npy     ← user pool (writable, survives upgrades)
+└── user_skill_metadata.jsonl     ← user pool
+```
+
+The daemon concatenates both at load time and treats them uniformly for retrieval. Upgrading the system index (re-running `install.sh`, or downloading a new version of `youngryankim/superskillret-index`) leaves your user pool untouched.
+
+### Hot reload — no restart needed
+
+`add` and `remove` mutate the in‑memory index inside the running daemon and persist atomically. Retrieval picks up the change on the very next prompt; no `/superskillret:stop` required.
 
 ## Files
 
@@ -115,7 +195,10 @@ superskillret/
 ├── commands/
 │   ├── status.md                  # /superskillret:status
 │   ├── stop.md                    # /superskillret:stop
-│   └── reset.md                   # /superskillret:reset (clear per-session dedup memory)
+│   ├── reset.md                   # /superskillret:reset (clear per-session dedup memory)
+│   ├── add.md                     # /superskillret:add <path>  (v0.2.0)
+│   ├── list.md                    # /superskillret:list        (v0.2.0)
+│   └── remove.md                  # /superskillret:remove <name> (v0.2.0)
 ├── scripts/
 │   ├── bootstrap.sh               # SessionStart: fork install.sh in background, exit in ms
 │   ├── install.sh                 # one‑shot setup (venv, ONNX encoder, embedding index)
@@ -125,7 +208,14 @@ superskillret/
 │   ├── quantize_onnx.py           # INT8‑quantize a fresh ONNX export
 │   ├── publish_index.py           # upload cache/ to HF dataset repo (maintainer only)
 │   ├── compare_backends.py        # PyTorch vs ONNX FP32 vs INT8 parity benchmark (dev)
-│   └── smoke_test.py              # small retrieval sanity test (dev)
+│   ├── smoke_test.py              # small retrieval sanity test (dev)
+│   ├── skill_validator.py         # SKILL.md validation (used by /superskillret:add, v0.2.0)
+│   ├── skill_io.py                # atomic append/remove on the user pool (v0.2.0)
+│   └── add_skill_cli.py           # CLI entry called by /superskillret:add (v0.2.0)
+├── tests/
+│   ├── fixtures/*.md              # SKILL.md samples covering valid and invalid cases
+│   ├── test_validator.py          # unit tests for skill_validator
+│   └── test_skill_io.py           # smoke tests for atomic append / remove
 ├── figure/
 │   ├── superskillret.pdf          # flow diagram source
 │   └── superskillret.png          # rendered for README inline display (300 dpi)
@@ -152,7 +242,8 @@ Model card eval (FP32): NDCG@15 = 0.7887, Recall@10 = 0.8542. The INT8 pipeline 
 - **No skills ever get injected.** Run `/superskillret:status`. If the socket is missing and ping fails, try `bash scripts/install.sh` directly in a terminal to see the full error. Common causes: HF repo unreachable, pip install failed.
 - **Retrieved skills feel off.** Raise `SUPERSKILLRET_MIN_SCORE` to `0.40`–`0.45` so only strongly matching hits survive, and/or drop `SUPERSKILLRET_TOP_K` to 1–2.
 - **Context window fills up too fast.** Each hit is ~2–5 KB of `SKILL.md`; lower `TOP_K` and raise `MIN_SCORE`. See the token‑cost table above.
-- **Want to use a custom skill pool.** Replace `skill_pool/skills.jsonl` (one JSON record per line with `name`, `description`, `body`), run `python scripts/build_index.py`, then restart the daemon via `/superskillret:stop`.
+- **Want to add a single custom skill.** Use `/superskillret:add <path-to-SKILL.md>` (v0.2.0). It validates the file, encodes it with the same ONNX INT8 encoder the daemon uses, and appends to a writable user pool. No daemon restart and no full index rebuild required. See [Adding custom skills](#adding-custom-skills).
+- **Want to replace the entire skill corpus.** Replace `skill_pool/skills.jsonl` (one JSON record per line with `name`, `description`, `body`), run `python scripts/build_index.py`, then restart the daemon via `/superskillret:stop`. This rebuilds the system index from scratch (~30–60 min on CPU); the user pool is preserved.
 
 ## Status & roadmap
 
@@ -160,6 +251,7 @@ Production‑ready and installed via the `lotusroot-kim` marketplace. End‑to�
 
 ### What's shipped
 
+- **Custom skill registration (v0.2.0)** — `/superskillret:add` accepts a SKILL.md path, validates frontmatter + body + security, runs quality checks (self-retrieval score, near-duplicate detection), then encodes via the ONNX INT8 path and appends to a writable user pool. Hot-reloaded into the in-memory index so the next prompt picks it up. Companion commands: `/superskillret:list`, `/superskillret:remove`. User pool is stored in `cache/user_skill_*` and survives system index upgrades.
 - **ONNX INT8 encoder** (598 MB, ~0.1 s CPU inference) replaces the 2.4 GB PyTorch path. ~18× faster than the original 5.5 s warm latency. Published at [`youngryankim/superskillret-onnx-int8`](https://huggingface.co/youngryankim/superskillret-onnx-int8).
 - **INT8‑quantized embedding index** (17 MB + 67 KB scale vs. 34 MB FP32), auto‑selected by the daemon when present. Reconstruction error mean 2e‑4 / max 8e‑4.
 - **Prebuilt index** at [`youngryankim/superskillret-index`](https://huggingface.co/datasets/youngryankim/superskillret-index) (public). `install.sh` downloads in ~5 s, falls back to a local rebuild (30–60 min on CPU) only if HF is unreachable.
