@@ -66,7 +66,7 @@ Bump `MIN_SCORE` if you want fewer, more relevant hits; lower it if you want mor
 |---|---|---|
 | `SUPERSKILLRET_DISABLE` | unset | set to `1` to turn the hook into a no‑op (retrieval is silently skipped) |
 | `SUPERSKILLRET_SPAWN_WAIT` | `180` | seconds the hook waits for a lazy‑spawned daemon to come up. Raise on slow networks / first‑time installs. |
-| `SUPERSKILLRET_SEEN_TRACKING` | `1` | per‑session dedup: skip skills already returned in the same Claude Code session. Set to `0` to always return the absolute top‑K. |
+| `SUPERSKILLRET_SEEN_TRACKING` | **`0`** (since v0.2.5) | per‑session dedup. Off by default: a skill's active framing (MUST/SHOULD directives) only stays "current authoritative reference material" while the skill is re-injected each turn, so dedup left the body in history but expired its active intent. Set to `1` if you'd rather save the ~5-7K tokens per repeated retrieve and accept that the same query may produce different behaviour across turns. |
 | `SUPERSKILLRET_ONNX_REPO` | `youngryankim/superskillret-onnx-int8` | HF repo the encoder is fetched from. Override to use your own fine‑tuned encoder. |
 | `SUPERSKILLRET_INDEX_REPO` | `youngryankim/superskillret-index` | HF repo the prebuilt index is fetched from. Override if you publish your own skill corpus. |
 
@@ -252,7 +252,9 @@ superskillret/
 2. The embedding index is stored as `skill_embeddings_int8.npy` + per‑vector `skill_embeddings_scale.npy` (75 % smaller than float32 with negligible quality loss); the daemon falls back to `skill_embeddings.npy` if only the float32 copy is present.
 3. At query time the daemon encodes `"Instruct: Given a skill search query, retrieve relevant skills that match the query\nQuery: <user prompt>"` (the query‑side prompt SKILLRET was trained with) and ranks skills by inner product.
 4. Hits below `MIN_SCORE` are dropped so off‑topic prompts (small talk, meta questions) emit an empty `additionalContext` and cost zero extra tokens.
-5. **Per‑session dedup**: the daemon remembers, per `session_id`, which skills it already returned in the current Claude Code session, and skips them next time. This stops the same `SKILL.md` from being re‑injected into every turn and surfaces fresh, related skills instead. The set of remembered sessions is LRU‑capped (`SUPERSKILLRET_MAX_SESSIONS`), reset per daemon restart, or clearable via `/superskillret:reset`.
+5. **Per‑session dedup (opt-in, off by default in v0.2.5+)**: when `SUPERSKILLRET_SEEN_TRACKING=1`, the daemon remembers — per `session_id` — which row indices it already returned, and skips them next time. This caps the same `SKILL.md` from being re-injected every turn and surfaces alternative skills, at the cost of inconsistent activation: a skill's `MUST/SHOULD` directives only stay authoritative while its body is being re-injected, so dedup expired its active framing while keeping the body lingering in conversation history. v0.2.5 flipped the default to off. The LRU cap is `SUPERSKILLRET_MAX_SESSIONS`; state resets per daemon restart and is clearable via `/superskillret:reset`.
+
+6. **Retrieved vs used (v0.2.5+)**: every emitted `additionalContext` asks Claude to print two notices — `_superskillret retrieved: …_` at the top (the names that came back from the daemon) and `_superskillret used: …_` at the bottom (the names whose bodies actually shaped this turn, or `none`). The "retrieved" line is deterministic and produced by the daemon; the "used" line is Claude's self-report. Comparing the two over a session is how you tell whether a particular skill is doing real work or just sitting in context.
 
 Model card eval (FP32): NDCG@15 = 0.7887, Recall@10 = 0.8542. The INT8 pipeline shipped here hasn't been re‑benchmarked against the official SKILLRET eval splits — see Roadmap.
 
