@@ -2,7 +2,7 @@
 
 > Embedding-based **skill retrieval plugin for Claude Code**. On every user prompt it silently picks the top‑K most relevant skills from a pool of 16,783 public skills and injects them as context — so Claude gets the right "how to" reference without you preloading every skill in the system prompt.
 
-Built on [`ThakiCloud/SkillRet-Embedding-0.6B`](https://huggingface.co/ThakiCloud/SkillRet-Embedding-0.6B) (fine‑tuned from Qwen3‑Embedding‑0.6B) over the [`ThakiCloud/SKILLRET`](https://huggingface.co/datasets/ThakiCloud/SKILLRET) 16,783‑skill corpus. Ships with an INT8‑quantized ONNX encoder ([`youngryankim/superskillret-onnx-int8`](https://huggingface.co/youngryankim/superskillret-onnx-int8), 598 MB) plus a prebuilt, INT8‑quantized embedding index ([`youngryankim/superskillret-index`](https://huggingface.co/datasets/youngryankim/superskillret-index)). Warm retrieval is ~0.3 s end‑to‑end on CPU.
+Built on [`ThakiCloud/SkillRet-Embedding-0.6B`](https://huggingface.co/ThakiCloud/SkillRet-Embedding-0.6B) (fine‑tuned from Qwen3‑Embedding‑0.6B) over the [`ThakiCloud/SKILLRET`](https://huggingface.co/datasets/ThakiCloud/SKILLRET) 16,783‑skill corpus. Ships with an INT8‑quantized ONNX encoder ([`ThakiCloud/superskillret-onnx-int8`](https://huggingface.co/ThakiCloud/superskillret-onnx-int8), 598 MB) plus a prebuilt, INT8‑quantized embedding index ([`ThakiCloud/superskillret-index`](https://huggingface.co/datasets/ThakiCloud/superskillret-index)). Warm retrieval is ~0.3 s end‑to‑end on CPU.
 
 ## Quickstart
 
@@ -69,8 +69,8 @@ Bump `MIN_SCORE` if you want fewer, more relevant hits; lower it if you want mor
 | `SUPERSKILLRET_DISABLE` | unset | set to `1` to turn the hook into a no‑op (retrieval is silently skipped) |
 | `SUPERSKILLRET_SPAWN_WAIT` | `180` | seconds the hook waits for a lazy‑spawned daemon to come up. Raise on slow networks / first‑time installs. |
 | `SUPERSKILLRET_SEEN_TRACKING` | **`0`** (since v0.2.5) | per‑session dedup. Off by default: a skill's active framing (MUST/SHOULD directives) only stays "current authoritative reference material" while the skill is re-injected each turn, so dedup left the body in history but expired its active intent. Set to `1` if you'd rather save the ~5-7K tokens per repeated retrieve and accept that the same query may produce different behaviour across turns. |
-| `SUPERSKILLRET_ONNX_REPO` | `youngryankim/superskillret-onnx-int8` | HF repo the encoder is fetched from. Override to use your own fine‑tuned encoder. |
-| `SUPERSKILLRET_INDEX_REPO` | `youngryankim/superskillret-index` | HF repo the prebuilt index is fetched from. Override if you publish your own skill corpus. |
+| `SUPERSKILLRET_ONNX_REPO` | `ThakiCloud/superskillret-onnx-int8` | HF repo the encoder is fetched from. Override to use your own fine‑tuned encoder. |
+| `SUPERSKILLRET_INDEX_REPO` | `ThakiCloud/superskillret-index` | HF repo the prebuilt index is fetched from. Override if you publish your own skill corpus. |
 
 Variables can be set in the shell, in `~/.claude/settings.json` under `"env": {...}`, or in the hook `command` itself. A handful of lower‑level knobs (socket/pid/log paths, ONNX dir override, session‑dedup internals, `BACKEND=pytorch` fallback) live in the daemon docstring if you need them.
 
@@ -201,7 +201,7 @@ cache/
 └── user_skill_metadata.jsonl     ← user pool
 ```
 
-The daemon concatenates both at load time and treats them uniformly for retrieval. Upgrading the system index (re-running `install.sh`, or downloading a new version of `youngryankim/superskillret-index`) leaves your user pool untouched.
+The daemon concatenates both at load time and treats them uniformly for retrieval. Upgrading the system index (re-running `install.sh`, or downloading a new version of `ThakiCloud/superskillret-index`) leaves your user pool untouched.
 
 ### Hot reload — no restart needed
 
@@ -277,9 +277,9 @@ Production‑ready and installed via the `thakicloud` marketplace. End‑to‑en
 ### What's shipped
 
 - **Custom skill registration (v0.2.0)** — `/superskillret:add` accepts a SKILL.md path, validates frontmatter + body + security, runs quality checks (self-retrieval score, near-duplicate detection), then encodes via the ONNX INT8 path and appends to a writable user pool. Hot-reloaded into the in-memory index so the next prompt picks it up. Companion commands: `/superskillret:list`, `/superskillret:remove`. User pool is stored in `cache/user_skill_*` and survives system index upgrades.
-- **ONNX INT8 encoder** (598 MB, ~0.1 s CPU inference) replaces the 2.4 GB PyTorch path. ~18× faster than the original 5.5 s warm latency. Published at [`youngryankim/superskillret-onnx-int8`](https://huggingface.co/youngryankim/superskillret-onnx-int8).
+- **ONNX INT8 encoder** (598 MB, ~0.1 s CPU inference) replaces the 2.4 GB PyTorch path. ~18× faster than the original 5.5 s warm latency. Published at [`ThakiCloud/superskillret-onnx-int8`](https://huggingface.co/ThakiCloud/superskillret-onnx-int8).
 - **INT8‑quantized embedding index** (17 MB + 67 KB scale vs. 34 MB FP32), auto‑selected by the daemon when present. Reconstruction error mean 2e‑4 / max 8e‑4.
-- **Prebuilt index** at [`youngryankim/superskillret-index`](https://huggingface.co/datasets/youngryankim/superskillret-index) (public). `install.sh` downloads in ~5 s, falls back to a local rebuild (30–60 min on CPU) only if HF is unreachable.
+- **Prebuilt index** at [`ThakiCloud/superskillret-index`](https://huggingface.co/datasets/ThakiCloud/superskillret-index) (public). `install.sh` downloads in ~5 s, falls back to a local rebuild (30–60 min on CPU) only if HF is unreachable.
 - **Self‑hosted marketplace** in the same repo (`.claude-plugin/marketplace.json`, HTTPS source so SSH‑keyless installs work).
 - **Auto‑bootstrap**: `SessionStart` hook forks `install.sh` in the background; `retrieve.py` shows a polite English wait‑notice until the `.installed` marker appears. No manual `bash scripts/install.sh` required for regular users.
 
@@ -302,7 +302,7 @@ Bump the index:
 ```bash
 # bump cache/VERSION first, then:
 python scripts/build_index.py
-HF_TOKEN=... python scripts/publish_index.py --repo youngryankim/superskillret-index
+HF_TOKEN=... python scripts/publish_index.py --repo ThakiCloud/superskillret-index
 ```
 
 Refresh the ONNX encoder:
@@ -310,7 +310,7 @@ Refresh the ONNX encoder:
 ```bash
 optimum-cli export onnx --model ThakiCloud/SkillRet-Embedding-0.6B ./onnx_model
 python scripts/quantize_onnx.py --src onnx_model --dst onnx_model_int8
-# then upload onnx_model_int8/ to youngryankim/superskillret-onnx-int8 via the HF web UI or hf upload
+# then upload onnx_model_int8/ to ThakiCloud/superskillret-onnx-int8 via the HF web UI or hf upload
 ```
 
 ## License
