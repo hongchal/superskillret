@@ -11,11 +11,13 @@ In a Claude Code session:
 ```
 /plugin marketplace add ThakiCloud/SUPERSKILLRET
 /plugin install superskillret@thakicloud
+/reload-plugins
+/superskillret:setup
 ```
 
-Then restart Claude Code (or run `/reload-plugins`). On the next `SessionStart`, a bootstrap hook spawns `scripts/install.sh` in the background. It creates a local venv, downloads the ONNX INT8 encoder and the prebuilt skill index from Hugging Face, and writes a `.installed` marker when it finishes — typically **1–2 minutes** on a reasonable connection.
+`/superskillret:setup` (v0.3.1) is the synchronous fast path — it runs `scripts/install.sh` inline, spawns the daemon, and verifies retrieval end-to-end with live progress (~1–2 minutes on first run, idempotent on re-run). You can skip it and rely on the background `SessionStart` bootstrap instead: the same `scripts/install.sh` then forks in the background, creates a local venv, downloads the ONNX INT8 encoder and the prebuilt skill index from Hugging Face, and writes a `.installed` marker when it finishes.
 
-While setup is running your first user prompts get a short English notice asking you to wait. Once `.installed` lands, skill retrieval activates automatically on every subsequent prompt. No manual step required.
+If you take the background path, your first user prompts get a short English notice asking you to wait. Either way, once `.installed` lands, skill retrieval activates automatically on every subsequent prompt.
 
 Follow progress with `tail -f /tmp/superskillret-install.log`. Inspect or reset the daemon at any time with `/superskillret:status` and `/superskillret:stop`.
 
