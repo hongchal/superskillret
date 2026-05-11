@@ -19,6 +19,12 @@ Environment variables:
   SUPERSKILLRET_DISABLE     if "1", hook returns empty context
 """
 
+# PEP 604 `X | Y` for type hints requires Python 3.10+. The plugin venv
+# is whatever `python3 -m venv` produces (frequently 3.9 on macOS), so we
+# defer all annotation evaluation to string form. This must follow the
+# module docstring per PEP 236.
+from __future__ import annotations
+
 import json
 import os
 import socket
