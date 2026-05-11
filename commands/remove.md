@@ -14,32 +14,32 @@ PLUGIN_ROOT="$(dirname "${CLAUDE_SKILL_DIR}")"
 PY="$PLUGIN_ROOT/.venv/bin/python"
 if [ ! -x "$PY" ]; then PY="$(command -v python3)"; fi
 
-ARGS="$ARGUMENTS"
-
-if [ -z "$ARGS" ]; then
+if [ -z "$ARGUMENTS" ]; then
   echo "Usage: /superskillret:remove <name>"
   echo ""
   echo "Use /superskillret:list to see registered names."
   exit 0
 fi
 
-"$PY" - "$ARGS" <<'PYEOF'
-import json, socket, sys
+PLUGIN_ROOT="$PLUGIN_ROOT" "$PY" - "$ARGUMENTS" <<'PYEOF'
+import os
+import sys
+sys.path.insert(0, os.path.join(os.environ["PLUGIN_ROOT"], "scripts"))
+
 name = sys.argv[1].strip()
-s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.settimeout(15.0)
+
 try:
-    s.connect("/tmp/superskillret.sock")
+    from daemon_client import daemon_request
+except ImportError as e:
+    print(f"FAIL: cannot import daemon_client ({e}); is the plugin venv set up?")
+    sys.exit(1)
+
+try:
+    reply = daemon_request({"op": "remove_user_skill", "name": name})
 except Exception as e:
-    print(f"daemon unreachable ({e})"); sys.exit(1)
-s.sendall((json.dumps({"op": "remove_user_skill", "name": name}) + "\n").encode())
-buf = b""
-while True:
-    c = s.recv(1 << 16)
-    if not c: break
-    buf += c
-    if b"\n" in buf: break
-s.close()
-reply = json.loads(buf.decode())
+    print(f"FAIL: {e}")
+    sys.exit(1)
+
 if reply.get("ok"):
     print(f"removed '{name}' (was at user-pool row {reply.get('removed_row')})")
 else:
