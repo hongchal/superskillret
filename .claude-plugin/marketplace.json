@@ -11,8 +11,8 @@
         "source": "url",
         "url": "https://github.com/hongchal/superskillret.git"
       },
-      "description": "Embedding-based skill retrieval. On every user prompt, picks the top-K relevant skills from a 16,783-skill pool (ThakiCloud/SKILLRET) and injects them as context, using the ThakiCloud/SkillRet-Embedding-0.6B encoder behind a long-running local daemon. v0.2.6: /list and /remove now lazy-spawn the daemon too (shared via scripts/daemon_client.py). v0.2.5 dedup default OFF + retrieved-vs-used self-report. v0.2.4 daemon lazy-spawn for /add. v0.2.3 empty-args fix. v0.2.2 PLUGIN_ROOT + bare-name + skip-dup. v0.2.1 lazy install. v0.2.0 custom skill registration.",
-      "version": "0.2.6",
+      "description": "Embedding-based skill retrieval. On every user prompt, picks the top-K relevant skills from a 16,783-skill pool (ThakiCloud/SKILLRET) and injects them as context, using the ThakiCloud/SkillRet-Embedding-0.6B encoder behind a long-running local daemon. v0.2.7: install.sh self-cleans its lock; retrieve.py prefers .installed marker (avoids stale-lock false positives) and the wait notice now shows the install log tail. v0.2.6 daemon_client.py. v0.2.5 dedup default OFF. v0.2.0–0.2.4 custom skill registration + UX fixes.",
+      "version": "0.2.7",
       "license": "MIT",
       "keywords": ["retrieval", "skills", "embedding", "rag", "hook"],
       "homepage": "https://github.com/hongchal/superskillret"

@@ -158,7 +158,15 @@ def emit(context: str):
 
 
 def _is_installing() -> bool:
-    """True if bootstrap.sh has kicked off install.sh and it's still running."""
+    """True if bootstrap.sh has kicked off install.sh and it's still running.
+
+    Returns False if INSTALL_DONE marker is already present (install.sh
+    completed and the lock should have been cleared, but a stale lock can
+    linger if install.sh crashed or PID re-use makes the alive-check
+    misleading).
+    """
+    if INSTALL_DONE.exists():
+        return False
     if not INSTALL_LOCK.exists():
         return False
     try:
@@ -207,7 +215,40 @@ def _trigger_install() -> bool:
         return False
 
 
+def _read_install_log_tail(max_lines: int = 4) -> str:
+    """Read the last few non-empty `[superskillret] ...` lines from the
+    install log so the wait notice can show concrete progress."""
+    try:
+        with open(INSTALL_LOG, "r", encoding="utf-8", errors="replace") as f:
+            # Read the whole file (it's tiny — a few KB at most) and pick
+            # the last `max_lines` meaningful steps. Ignore progress-bar
+            # CR-only updates and library deprecation warnings.
+            lines = []
+            for raw in f:
+                line = raw.rstrip()
+                if not line:
+                    continue
+                if "NotOpenSSLWarning" in line or "warnings.warn" in line:
+                    continue
+                # tqdm progress bars use \r so they end up on one giant
+                # line — keep only the final segment.
+                if "\r" in line:
+                    line = line.split("\r")[-1].rstrip()
+                lines.append(line)
+            return "\n".join(lines[-max_lines:]) if lines else ""
+    except FileNotFoundError:
+        return ""
+
+
 def _install_wait_message() -> str:
+    log_tail = _read_install_log_tail()
+    progress = (
+        f"> \n"
+        f"> Latest progress (from `{INSTALL_LOG}`):\n"
+        f"> ```\n"
+        + "".join(f"> {line}\n" for line in log_tail.split("\n"))
+        + f"> ```\n"
+    ) if log_tail else ""
     return (
         "> **superskillret: first-time setup is still running in the background.**\n"
         "> \n"
@@ -216,8 +257,9 @@ def _install_wait_message() -> str:
         "> on a reasonable connection, longer on slow networks or first-time pip\n"
         "> installs. Please wait for it to finish and then retry your prompt — skill\n"
         "> retrieval will activate automatically on the next send.\n"
+        + progress +
         "> \n"
-        f"> Follow progress: `tail -f {INSTALL_LOG}`\n"
+        f"> Follow live: `tail -f {INSTALL_LOG}`\n"
         "> Check status any time with `/superskillret:status`.\n"
     )
 

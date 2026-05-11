@@ -166,6 +166,12 @@ fi
 
 touch "$ROOT/.installed"
 
+# Clear the install lock retrieve.py / bootstrap.sh wrote when they
+# kicked us off, so retrieve.py stops emitting "still installing" notices.
+# Stale PID reuse would otherwise mis-classify this lock as "in progress"
+# even after the script exits.
+rm -f "${SUPERSKILLRET_INSTALL_LOCK:-/tmp/superskillret-install.lock}"
+
 log "install complete."
 log "  plugin python:  $PY"
 log "  socket path:    ${SUPERSKILLRET_SOCKET:-/tmp/superskillret.sock}"
