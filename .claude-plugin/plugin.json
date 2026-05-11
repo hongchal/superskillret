@@ -1,7 +1,7 @@
 {
   "name": "superskillret",
-  "version": "0.2.4",
-  "description": "Embedding-based skill retrieval for Claude Code. On every user prompt, picks the top-K relevant skills from a 16,783-skill pool and injects them as context. v0.2.3: commands/add.md no longer short-circuits on empty arguments — the CLI handles the default-directory scan itself, so `/superskillret:add` with no argument now works as intended. v0.2.2: slash-command PLUGIN_ROOT fix; bare name + default-dir + directory batch + skip-duplicates. v0.2.1: retrieve.py lazy-forks install.sh. v0.2.0: Custom skill registration.",
+  "version": "0.2.5",
+  "description": "Embedding-based skill retrieval for Claude Code. On every user prompt, picks the top-K relevant skills from a 16,783-skill pool and injects them as context. v0.2.5: per-session dedup default flipped to OFF — a skill's active framing (e.g. MUST/SHOULD) only stays authoritative while its body is re-injected each turn, so dedup caused inconsistent activation across the same query. Opt in with SUPERSKILLRET_SEEN_TRACKING=1 if you'd rather save tokens. v0.2.4 added daemon lazy-spawn from CLI; v0.2.3 fixed empty-args; v0.2.2 fixed PLUGIN_ROOT + bare-name + skip-duplicate; v0.2.1 lazy install.sh; v0.2.0 custom skill registration.",
   "author": {
     "name": "lotusroot-kim",
     "url": "https://github.com/lotusroot-kim"

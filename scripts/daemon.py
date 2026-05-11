@@ -29,8 +29,13 @@ Environment variables:
   SUPERSKILLRET_MODEL     default ThakiCloud/SkillRet-Embedding-0.6B
   SUPERSKILLRET_PIDFILE   default /tmp/superskillret.pid
   SUPERSKILLRET_LOG       default /tmp/superskillret.log
-  SUPERSKILLRET_SEEN_TRACKING default "1". Set to "0" to always return
-                          the absolute top-K without per-session dedup.
+  SUPERSKILLRET_SEEN_TRACKING default "0" (as of v0.2.5). Set to "1" to
+                          enable per-session dedup, which skips a skill on
+                          re-retrieve within the same Claude Code session.
+                          Off by default because a skill's active framing
+                          ("authoritative reference material") expires when
+                          its body is no longer re-injected, even though
+                          the body lingers in conversation history.
   SUPERSKILLRET_MAX_SESSIONS  default 100. LRU cap on tracked sessions.
   SUPERSKILLRET_OVERFETCH default 4. When dedup is on, fetch top-K * this
                           many candidates before filtering.
@@ -80,8 +85,16 @@ ONNX_DIR = Path(os.environ.get(
 
 # Per-session skill dedup: a skill index already returned to a given session_id
 # is skipped in that session's future retrievals.
+#
+# Default OFF as of v0.2.5: previous design (default on) was confusing in
+# practice because a SKILL.md's framing (e.g. MUST/SHOULD directives) only
+# stays "current authoritative reference material" while the skill is being
+# re-injected each turn. Dedup left the body in conversation history but
+# expired its active framing, so the same query produced inconsistent
+# behaviour across turns. Users who want token-cost reduction over
+# consistent activation can opt in with SUPERSKILLRET_SEEN_TRACKING=1.
 MAX_SESSIONS = int(os.environ.get("SUPERSKILLRET_MAX_SESSIONS", "100"))
-SEEN_TRACKING = os.environ.get("SUPERSKILLRET_SEEN_TRACKING", "1") == "1"
+SEEN_TRACKING = os.environ.get("SUPERSKILLRET_SEEN_TRACKING", "0") == "1"
 # Over-fetch factor when dedup is on so that after filtering we still have
 # enough candidates to return TOP_K hits.
 OVERFETCH = int(os.environ.get("SUPERSKILLRET_OVERFETCH", "4"))

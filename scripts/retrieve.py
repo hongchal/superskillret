@@ -115,13 +115,19 @@ def format_context(hits: list) -> str:
     summary = ", ".join(
         f"`{h.get('name','?')}` ({h.get('score',0):.2f})" for h in hits
     )
+    names_csv = ", ".join(f"`{h.get('name','?')}`" for h in hits)
     lines = [
         f"**superskillret retrieved top-{len(hits)}:** {summary}",
         "",
-        "Before answering, begin your response with a one-line notice:",
-        f"> _superskillret: using {summary}_",
+        "Begin your response with a one-line notice naming the skills retrieved:",
+        f"> _superskillret retrieved: {summary}_",
         "",
-        "Then use the skills below as authoritative reference material for the user's request.",
+        "Use the skills below as authoritative reference material for the user's request when relevant.",
+        "",
+        "**After your answer, append exactly one final line declaring which of the retrieved skills you actually used to shape your response. This is required even when the answer feels unrelated — write `none` in that case.** Format:",
+        f"> _superskillret used: <comma-separated names from {{{names_csv}}}, or `none`>_",
+        "",
+        "Definition: a skill counts as \"used\" if its body materially influenced this turn — directives followed, facts cited, or its structure adopted. Skills whose body you only acknowledged without applying do not count.",
         "",
         "---",
         "",
