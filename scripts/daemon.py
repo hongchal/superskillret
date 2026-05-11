@@ -49,11 +49,23 @@ from pathlib import Path
 
 import numpy as np
 
+# Make sibling scripts/ modules importable when daemon is launched directly.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from skill_io import (  # noqa: E402
+    append_user_skill,
+    load_user_index,
+    make_user_skill_record,
+    remove_user_skill_by_name,
+)
+
 ROOT = Path(__file__).resolve().parent.parent
 EMB_PATH = ROOT / "cache" / "skill_embeddings.npy"
 EMB_INT8_PATH = ROOT / "cache" / "skill_embeddings_int8.npy"
 EMB_SCALE_PATH = ROOT / "cache" / "skill_embeddings_scale.npy"
 META_PATH = ROOT / "cache" / "skill_metadata.jsonl"
+USER_EMB_PATH = ROOT / "cache" / "user_skill_embeddings.npy"
+USER_META_PATH = ROOT / "cache" / "user_skill_metadata.jsonl"
 
 SOCKET_PATH = os.environ.get("SUPERSKILLRET_SOCKET", "/tmp/superskillret.sock")
 PID_PATH = os.environ.get("SUPERSKILLRET_PIDFILE", "/tmp/superskillret.pid")
@@ -172,6 +184,12 @@ def make_encoder(device: str):
 
 
 def load_index():
+    """Load the system index, then concatenate the user-pool index on top.
+
+    Returns (embeddings, metadata, system_count) where system_count is the
+    number of system rows. Row indices >= system_count belong to the
+    user-pool (writable; survives system index upgrades).
+    """
     if EMB_INT8_PATH.exists() and EMB_SCALE_PATH.exists():
         logging.info("loading INT8 index from %s", EMB_INT8_PATH)
         embeddings_int8 = np.load(EMB_INT8_PATH)
@@ -184,16 +202,43 @@ def load_index():
     with META_PATH.open(encoding="utf-8") as f:
         for line in f:
             metadata.append(json.loads(line))
-    logging.info("loaded %d embeddings, %d metadata records", len(embeddings), len(metadata))
-    return embeddings, metadata
+    system_count = len(metadata)
+    logging.info(
+        "loaded %d system embeddings, %d system metadata records",
+        len(embeddings), system_count,
+    )
+
+    embed_dim = embeddings.shape[1] if embeddings.shape[0] else 1024
+    try:
+        user_emb, user_meta = load_user_index(
+            USER_EMB_PATH, USER_META_PATH, embed_dim=embed_dim
+        )
+    except RuntimeError as e:
+        logging.error("user index inconsistent (%s); skipping user pool", e)
+        user_emb = np.zeros((0, embed_dim), dtype=np.float16)
+        user_meta = []
+
+    if user_emb.shape[0] > 0:
+        embeddings = np.vstack([embeddings, user_emb.astype(np.float32)])
+        metadata.extend(user_meta)
+        logging.info(
+            "appended %d user-pool skills (global rows %d..%d)",
+            user_emb.shape[0], system_count, len(metadata) - 1,
+        )
+
+    return embeddings, metadata, system_count
 
 
 class RetrievalServer:
     def __init__(self):
         self.device = pick_device()
         self.encoder = make_encoder(self.device)
-        self.embeddings, self.metadata = load_index()
+        self.embeddings, self.metadata, self.system_count = load_index()
+        self.embed_dim = (
+            self.embeddings.shape[1] if self.embeddings.shape[0] else 1024
+        )
         self._lock = threading.Lock()
+        self._index_lock = threading.Lock()
         # LRU: session_id -> ordered set of skill indices already returned
         # Keyed by session_id; when size exceeds MAX_SESSIONS we drop the oldest.
         self._seen: "OrderedDict[str, set[int]]" = OrderedDict()
@@ -251,6 +296,176 @@ class RetrievalServer:
             "skipped_seen": skipped,
         }
 
+    # ------------------------------------------------------------------
+    # User-pool skill management (add / list / remove)
+    # ------------------------------------------------------------------
+
+    def _find_existing_global_row(self, name: str):
+        for i, m in enumerate(self.metadata):
+            if m.get("name") == name:
+                return i
+        return None
+
+    def _encode_skill(self, name: str, description: str) -> np.ndarray:
+        """Encode a skill's (name | description) into a normalized float32
+        vector, using the same skill-side format as build_index.py."""
+        text = f"{name} | {description}".strip()
+        with self._lock:
+            vec = self.encoder.encode(text)
+        return vec.astype(np.float32)
+
+    def _encode_query(self, query: str) -> np.ndarray:
+        with self._lock:
+            return self.encoder.encode(QUERY_PROMPT + query).astype(np.float32)
+
+    def _quality_check(self, skill_vec: np.ndarray, description: str,
+                       exclude_global_row: int = -1) -> dict:
+        """Compute self-retrieval score and nearest-existing similarity for
+        a newly-encoded skill vector."""
+        # Self-retrieval: encode `description` as a query and measure
+        # similarity to the just-built skill vector. Both are L2-normalized
+        # so inner product is the cosine score.
+        try:
+            query_vec = self._encode_query(description)
+            self_score = float(skill_vec @ query_vec)
+        except Exception as e:
+            logging.warning("self-retrieval encode failed: %s", e)
+            self_score = None
+
+        # Nearest-existing: argmax over the current index.
+        nearest_name = None
+        nearest_score = None
+        if self.embeddings.shape[0] > 0:
+            sims = self.embeddings @ skill_vec
+            if exclude_global_row >= 0 and exclude_global_row < sims.shape[0]:
+                sims[exclude_global_row] = -np.inf
+            top = int(np.argmax(sims))
+            nearest_score = float(sims[top])
+            nearest_name = self.metadata[top].get("name") if top < len(self.metadata) else None
+
+        return {
+            "self_retrieval_score": self_score,
+            "nearest_existing_name": nearest_name,
+            "nearest_existing_score": nearest_score,
+        }
+
+    def add_skill(self, payload: dict) -> dict:
+        name = (payload.get("name") or "").strip()
+        description = (payload.get("description") or "").strip()
+        body = payload.get("body") or ""
+        force = bool(payload.get("force"))
+        source = payload.get("source") or ""
+
+        if not name or not description or not body:
+            return {"ok": False,
+                    "error": "name, description, and body are required"}
+
+        t_enc = time.time()
+        skill_vec_fp32 = self._encode_skill(name, description)
+        encode_ms = (time.time() - t_enc) * 1000.0
+
+        with self._index_lock:
+            existing_global = self._find_existing_global_row(name)
+
+            if existing_global is not None and existing_global < self.system_count:
+                return {"ok": False,
+                        "error": f"name '{name}' collides with a system skill"
+                                 f" at row {existing_global}; pick a different name"}
+
+            if existing_global is not None and not force:
+                return {"ok": False,
+                        "error": f"name '{name}' already in user pool at row "
+                                 f"{existing_global}; pass force=true to overwrite"}
+
+            if existing_global is not None and force:
+                user_local = existing_global - self.system_count
+                remove_user_skill_by_name(
+                    USER_EMB_PATH, USER_META_PATH, name,
+                    embed_dim=self.embed_dim,
+                )
+                del self.metadata[existing_global]
+                self.embeddings = np.delete(
+                    self.embeddings, existing_global, axis=0
+                )
+
+            # Quality check before persisting (against pre-insert index).
+            quality = self._quality_check(skill_vec_fp32, description)
+
+            # Persist to user pool (atomic).
+            skill_vec_fp16 = skill_vec_fp32.astype(np.float16)
+            record = make_user_skill_record(
+                name=name, description=description, body=body,
+                source_url=source if source.startswith(("http://", "https://"))
+                else "",
+            )
+            user_local_row = append_user_skill(
+                USER_EMB_PATH, USER_META_PATH,
+                skill_vec_fp16, record, embed_dim=self.embed_dim,
+            )
+
+            # Hot-reload in-memory index.
+            self.embeddings = np.vstack(
+                [self.embeddings, skill_vec_fp32[None, :]]
+            )
+            self.metadata.append(record)
+            global_row = len(self.metadata) - 1
+
+        return {
+            "ok": True,
+            "name": name,
+            "user_row_index": user_local_row,
+            "global_row_index": global_row,
+            "system_count": self.system_count,
+            "encode_ms": encode_ms,
+            "quality": quality,
+        }
+
+    def list_user_skills(self) -> dict:
+        with self._index_lock:
+            user_skills = [
+                {
+                    "name": m.get("name"),
+                    "description": m.get("description"),
+                    "body": m.get("body"),
+                    "global_row": i,
+                    "user_row": i - self.system_count,
+                }
+                for i, m in enumerate(self.metadata)
+                if i >= self.system_count
+            ]
+        return {"ok": True, "skills": user_skills, "count": len(user_skills)}
+
+    def remove_user_skill(self, payload: dict) -> dict:
+        name = (payload.get("name") or "").strip()
+        if not name:
+            return {"ok": False, "error": "name required"}
+
+        with self._index_lock:
+            existing_global = self._find_existing_global_row(name)
+            if existing_global is None:
+                return {"ok": False, "error": f"no skill named '{name}'"}
+            if existing_global < self.system_count:
+                return {"ok": False,
+                        "error": f"'{name}' is a system skill at row "
+                                 f"{existing_global}; refusing to remove "
+                                 "(reinstall to refresh system index instead)"}
+
+            user_local = existing_global - self.system_count
+            ok = remove_user_skill_by_name(
+                USER_EMB_PATH, USER_META_PATH, name,
+                embed_dim=self.embed_dim,
+            )
+            if not ok:
+                return {"ok": False,
+                        "error": f"persist remove failed for '{name}'"}
+
+            del self.metadata[existing_global]
+            self.embeddings = np.delete(
+                self.embeddings, existing_global, axis=0
+            )
+
+        return {"ok": True, "name": name, "removed_row": user_local}
+
     def handle(self, conn: socket.socket):
         try:
             conn.settimeout(30)
@@ -285,6 +500,18 @@ class RetrievalServer:
                 conn.sendall(b'{"ok": true}\n')
                 logging.info("shutdown requested via socket")
                 os.kill(os.getpid(), signal.SIGTERM)
+                return
+            if req.get("op") == "add_skill":
+                reply = self.add_skill(req)
+                conn.sendall(json.dumps(reply, ensure_ascii=False).encode() + b"\n")
+                return
+            if req.get("op") == "list_user_skills":
+                reply = self.list_user_skills()
+                conn.sendall(json.dumps(reply, ensure_ascii=False).encode() + b"\n")
+                return
+            if req.get("op") == "remove_user_skill":
+                reply = self.remove_user_skill(req)
+                conn.sendall(json.dumps(reply, ensure_ascii=False).encode() + b"\n")
                 return
             prompt = req.get("prompt", "")
             top_k = int(req.get("top_k", 3))
