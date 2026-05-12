@@ -2,7 +2,7 @@
 
 > Embedding-based **skill retrieval plugin for Claude Code**. On every user prompt it silently picks the top‑K most relevant skills from a pool of 16,783 public skills and injects them as context — so Claude gets the right "how to" reference without you preloading every skill in the system prompt.
 
-Built on [`ThakiCloud/SkillRet-Embedding-0.6B`](https://huggingface.co/ThakiCloud/SkillRet-Embedding-0.6B) (fine‑tuned from Qwen3‑Embedding‑0.6B) over the [`ThakiCloud/SKILLRET`](https://huggingface.co/datasets/ThakiCloud/SKILLRET) 16,783‑skill corpus. Ships with an INT8‑quantized ONNX encoder ([`youngryankim/superskillret-onnx-int8`](https://huggingface.co/youngryankim/superskillret-onnx-int8), 598 MB) plus a prebuilt, INT8‑quantized embedding index ([`youngryankim/superskillret-index`](https://huggingface.co/datasets/youngryankim/superskillret-index)). Warm retrieval is ~0.3 s end‑to‑end on CPU.
+Built on [`ThakiCloud/SkillRet-Embedding-0.6B`](https://huggingface.co/ThakiCloud/SkillRet-Embedding-0.6B) (fine‑tuned from Qwen3‑Embedding‑0.6B) over the [`ThakiCloud/SKILLRET`](https://huggingface.co/datasets/ThakiCloud/SKILLRET) 16,783‑skill corpus. Ships with an INT8‑quantized ONNX encoder ([`youngryankim/superskillret-onnx-int8`](https://huggingface.co/youngryankim/superskillret-onnx-int8), 598 MB) for runtime prompt encoding, plus a prebuilt FP16 embedding index ([`youngryankim/superskillret-index`](https://huggingface.co/datasets/youngryankim/superskillret-index), 34 MB) — the index is built once with the FP32 PyTorch encoder for maximum retrieval quality, then cast to float16 for disk economy. Warm retrieval is ~0.3 s end‑to‑end on CPU.
 
 ## Quickstart
 
@@ -48,7 +48,7 @@ Two details not shown in the diagram but live in the code:
 `superskillret` ships a small **local inference daemon** that owns the ONNX encoder and the 16,783‑skill index in memory. Treat it as a first‑class background service on your machine — like Docker Desktop or PiecesOS — not an internal implementation detail.
 
 **Footprint**
-- **RAM:** ~1.0–1.4 GB resident (ONNX encoder + INT8 embedding index + Python runtime). Lower than Tabnine local (1.5–2.5 GB), roughly comparable to GitHub Copilot's LSP under load.
+- **RAM:** ~1.0–1.4 GB resident (ONNX INT8 encoder + FP16 embedding index + Python runtime). Lower than Tabnine local (1.5–2.5 GB), roughly comparable to GitHub Copilot's LSP under load.
 - **Disk:** ~800 MB total — 598 MB ONNX encoder under `.venv`, 152 MB skill metadata, 33 MB embeddings, plus the venv itself.
 - **Network:** outbound to `huggingface.co` only on first install (and on explicit index/encoder upgrades). No telemetry, no calls during retrieval.
 
@@ -186,6 +186,8 @@ cat my-auth.md | /superskillret:add -
 
 **Duplicate handling**: re-running on a file whose `name` is already in the user pool prints `○ Skipped 'foo' — already in user pool` and does **not** count as a failure. The batch summary distinguishes added vs. skipped vs. failed. To replace an existing entry, pass `--force` (e.g. `/superskillret:add ~/skills/my-auth.md --force`).
 
+**Encoder asymmetry (user pool vs system pool)**: the published system index (16,783 skills) was built once with the FP32 PyTorch `ThakiCloud/SkillRet-Embedding-0.6B` model and stored as FP16, while user skills added via `/superskillret:add` are encoded by the runtime ONNX INT8 encoder (the same one that encodes every query). The two pools therefore live in slightly different embedding spaces. In practice the gap is negligible — INT8 reconstruction error vs FP32 is mean 2e‑4 / max 8e‑4, well below the cosine gap between adjacent retrieval ranks, and smoke-test parity is top‑1 100 % / top‑5 80 % vs the FP32 reference. The alternative (loading a full FP32 PyTorch encoder for `/superskillret:add`) would balloon the on-disk footprint from ~600 MB ONNX to ~2.4 GB PyTorch, which we deliberately avoid.
+
 Output on success:
 ```
 ✓ Added 'my-auth' to superskillret
@@ -278,14 +280,14 @@ superskillret/
 ## Retrieval pipeline internals
 
 1. Each skill's `(name | description)` is encoded at build time with the SKILLRET model; embeddings are L2‑normalized.
-2. The embedding index is stored as `skill_embeddings_int8.npy` + per‑vector `skill_embeddings_scale.npy` (75 % smaller than float32 with negligible quality loss); the daemon falls back to `skill_embeddings.npy` if only the float32 copy is present.
+2. The **published** embedding index is `skill_embeddings.npy` (FP16, 34 MB), built once with the FP32 PyTorch encoder for maximum retrieval quality and then cast to float16 for disk economy. The daemon will preferentially load INT8‑quantized variants (`skill_embeddings_int8.npy` + per‑vector `skill_embeddings_scale.npy`, ~17 MB + 67 KB; 75 % smaller, reconstruction error mean 2e‑4 / max 8e‑4) if you produce them locally via `scripts/quantize_onnx.py`. INT8 quantization is opt‑in — the HF dataset only ships the FP16 copy.
 3. At query time the daemon encodes `"Instruct: Given a skill search query, retrieve relevant skills that match the query\nQuery: <user prompt>"` (the query‑side prompt SKILLRET was trained with) and ranks skills by inner product.
 4. Hits below `MIN_SCORE` are dropped so off‑topic prompts (small talk, meta questions) emit an empty `additionalContext` and cost zero extra tokens.
 5. **Per‑session dedup (opt-in, off by default in v0.2.5+)**: when `SUPERSKILLRET_SEEN_TRACKING=1`, the daemon remembers — per `session_id` — which row indices it already returned, and skips them next time. This caps the same `SKILL.md` from being re-injected every turn and surfaces alternative skills, at the cost of inconsistent activation: a skill's `MUST/SHOULD` directives only stay authoritative while its body is being re-injected, so dedup expired its active framing while keeping the body lingering in conversation history. v0.2.5 flipped the default to off. The LRU cap is `SUPERSKILLRET_MAX_SESSIONS`; state resets per daemon restart and is clearable via `/superskillret:reset`.
 
 6. **Retrieved vs used (v0.2.5+)**: every emitted `additionalContext` asks Claude to print two notices — `_superskillret retrieved: …_` at the top (the names that came back from the daemon) and `_superskillret used: …_` at the bottom (the names whose bodies actually shaped this turn, or `none`). The "retrieved" line is deterministic and produced by the daemon; the "used" line is Claude's self-report. Comparing the two over a session is how you tell whether a particular skill is doing real work or just sitting in context.
 
-Model card eval (FP32): NDCG@15 = 0.7887, Recall@10 = 0.8542. The INT8 pipeline shipped here hasn't been re‑benchmarked against the official SKILLRET eval splits — see Roadmap.
+Model card eval (FP32): NDCG@15 = 0.7887, Recall@10 = 0.8542. The runtime ONNX INT8 encoder shipped here hasn't been re‑benchmarked against the official SKILLRET eval splits — see Roadmap. The published embedding index itself is FP16 from the FP32 PyTorch encoder, so the *index* side of the pipeline incurs no quantization loss beyond fp16 rounding.
 
 ## Troubleshooting
 
@@ -315,13 +317,13 @@ Model card eval (FP32): NDCG@15 = 0.7887, Recall@10 = 0.8542. The INT8 pipeline 
 
 ## Status & roadmap
 
-Production‑ready and installed via the `hongchal` marketplace. End‑to‑end verified in a live Claude Code session. Default backend is ONNX INT8, default embedding index is INT8‑quantized, default install path (HF prebuilt fetch) takes ~45 s on a healthy connection.
+Production‑ready and installed via the `hongchal` marketplace. End‑to‑end verified in a live Claude Code session. Default runtime encoder is ONNX INT8, default published embedding index is FP16 (34 MB, built with the FP32 PyTorch encoder), default install path (HF prebuilt fetch) takes ~45 s on a healthy connection.
 
 ### What's shipped
 
 - **Custom skill registration (v0.2.0)** — `/superskillret:add` accepts a SKILL.md path, validates frontmatter + body + security, runs quality checks (self-retrieval score, near-duplicate detection), then encodes via the ONNX INT8 path and appends to a writable user pool. Hot-reloaded into the in-memory index so the next prompt picks it up. Companion commands: `/superskillret:list`, `/superskillret:remove`. User pool is stored in `cache/user_skill_*` and survives system index upgrades.
 - **ONNX INT8 encoder** (598 MB, ~0.1 s CPU inference) replaces the 2.4 GB PyTorch path. ~18× faster than the original 5.5 s warm latency. Published at [`youngryankim/superskillret-onnx-int8`](https://huggingface.co/youngryankim/superskillret-onnx-int8).
-- **INT8‑quantized embedding index** (17 MB + 67 KB scale vs. 34 MB FP32), auto‑selected by the daemon when present. Reconstruction error mean 2e‑4 / max 8e‑4.
+- **FP16 embedding index** (34 MB), built once with the FP32 PyTorch `ThakiCloud/SkillRet-Embedding-0.6B` encoder and cast to float16 for disk. The daemon will auto‑select an INT8‑quantized variant (~17 MB + 67 KB scale, reconstruction error mean 2e‑4 / max 8e‑4) if you produce one locally via `scripts/quantize_onnx.py`; the HF dataset itself ships only the FP16 copy by default.
 - **Prebuilt index** at [`youngryankim/superskillret-index`](https://huggingface.co/datasets/youngryankim/superskillret-index) (public). `install.sh` downloads in ~5 s, falls back to a local rebuild (30–60 min on CPU) only if HF is unreachable.
 - **Self‑hosted marketplace** in the same repo (`.claude-plugin/marketplace.json`, HTTPS source so SSH‑keyless installs work).
 - **Auto‑bootstrap**: `SessionStart` hook forks `install.sh` in the background; `retrieve.py` shows a polite English wait‑notice until the `.installed` marker appears. No manual `bash scripts/install.sh` required for regular users.
@@ -329,7 +331,7 @@ Production‑ready and installed via the `hongchal` marketplace. End‑to‑end 
 ### Known limitations
 
 - **No idle timeout on the daemon.** It stays resident (~1.4 GB RAM) until `/superskillret:stop` or a kill.
-- **Quality is spot‑checked, not formally benchmarked.** Parity vs. the FP32 PyTorch reference is top‑1 100 % / top‑5 80 % on a 10‑query smoke test. NDCG@15 / Recall@10 against the official SKILLRET eval splits has not been re‑run for the INT8 pipeline.
+- **Quality is spot‑checked, not formally benchmarked.** Parity vs. the FP32 PyTorch reference is top‑1 100 % / top‑5 80 % on a 10‑query smoke test. NDCG@15 / Recall@10 against the official SKILLRET eval splits has not been re‑run for the runtime ONNX INT8 encoder pipeline. (The index side is FP16 from the FP32 encoder, so no eval drift expected there.)
 - **Token cost is real.** At defaults each on‑topic prompt costs ~5–7 K extra input tokens. See Configuration for the cost table.
 
 ### Roadmap — pick‑one, pick‑none
