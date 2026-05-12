@@ -6,18 +6,15 @@ Built on [`ThakiCloud/SkillRet-Embedding-0.6B`](https://huggingface.co/ThakiClou
 
 ## Quickstart
 
-In a Claude Code session:
+**Step 1 — Install the plugin (in a Claude Code session).**
 
 ```
 /plugin marketplace add ThakiCloud/SUPERSKILLRET
 /plugin install superskillret@thakicloud
 /reload-plugins
-/superskillret:setup
 ```
 
-`/superskillret:setup` is the synchronous fast path — four phases with live progress: (1) auto-mode authorization (idempotent `autoMode.allow` entry in `~/.claude/settings.json` so the per-prompt `retrieve.py` hook isn't silently blocked by the classifier), (2) `scripts/install.sh`, (3) daemon spawn, (4) end-to-end verify. ~1–2 minutes on first run, idempotent on re-run.
-
-**Manual fallback — direct shell invocation.** If the slash command doesn't fire for any reason (older Claude Code build, plugin commands not surfaced yet, or you just want to run setup outside the Claude Code REPL), run the underlying CLI directly from any terminal:
+**Step 2 — Run the setup CLI from a regular shell, *outside* the Claude Code REPL. This step is required before any retrieval can fire.**
 
 ```bash
 # auto-detect the installed plugin path
@@ -27,15 +24,17 @@ python3 "$(find ~/.claude/plugins/cache -path '*/superskillret/*/scripts/setup_c
 python3 ~/.claude/plugins/cache/thakicloud/superskillret/0.3.1/scripts/setup_cli.py
 ```
 
-Same phases, same idempotency, same exit code. This is also what you point users at when `/superskillret:setup` gets gated by an auto-mode classifier that hasn't yet seen the allow rule.
+Four phases with live progress: (1) auto-mode authorization (idempotent `autoMode.allow` entry in `~/.claude/settings.json` so the per-prompt `retrieve.py` hook isn't silently blocked by the classifier), (2) `scripts/install.sh`, (3) daemon spawn, (4) end-to-end verify. ~1–2 minutes on first run, idempotent on re-run.
 
-**Auto-mode users:** `/superskillret:setup` works cleanly under auto-mode because (a) the slash-command body is a single literal `python3 "/absolute/.../setup_cli.py"` — no `$(...)` subshells, no unresolved `${...}` — which passes Claude Code's static shell-permission check, and (b) explicit slash-command invocation is treated as direct user intent by the auto-mode classifier, so it isn't gated as "freshly installed external code." No `Shift+Tab` bypass required. Phase 1 of setup then writes the `autoMode.allow` entry so subsequent `retrieve.py` hook firings (auto-fired by CC, not by the user) are also classifier-trusted.
+**Step 3 — Use it.** Open or continue a Claude Code session — retrieval is now active on every prompt. The same CLI is also exposed as the `/superskillret:setup` slash command for in‑session daemon (re)spawn after `/stop` or a crash, alongside `/superskillret:status` and `/superskillret:stop`.
 
-You can skip `/setup` entirely and rely on the background `SessionStart` bootstrap instead: `scripts/install.sh` then forks in the background, creates a local venv, downloads the ONNX INT8 encoder and the prebuilt skill index from Hugging Face, and writes a `.installed` marker when it finishes. The background path does **not** write the auto-mode allow rule — under auto-mode, retrieval will be silently no-op'd until you run `/setup` or edit `settings.json` yourself.
+---
 
-If you take the background path, your first user prompts get a short English notice asking you to wait. Either way, once `.installed` lands, skill retrieval activates automatically on every subsequent prompt.
+**Why shell-first instead of `/superskillret:setup`?** The slash command works fine once everything is registered, but right after `/plugin install` + `/reload-plugins` there is a small window where `/superskillret:setup` may not yet be visible in the command palette, and under auto-mode the per-prompt `retrieve.py` hook is gated until the setup CLI writes the allow rule. Running the shell CLI first removes both issues — it has no dependency on Claude Code's command registry and writes `autoMode.allow` *before* any hook can fire.
 
-Follow progress with `tail -f /tmp/superskillret-install.log`. Manage the daemon at any time with `/superskillret:setup` (start / re‑spawn — idempotent), `/superskillret:status`, and `/superskillret:stop`.
+**Background bootstrap alternative.** You can skip Step 2 and rely on the `SessionStart` hook that forks `scripts/install.sh` in the background on the next session start: it creates a local venv, downloads the ONNX INT8 encoder and the prebuilt skill index from Hugging Face, and writes a `.installed` marker when finished. **Caveat:** the background path does *not* write the auto-mode allow rule — under auto-mode, retrieval will silently no-op until you run Step 2 (or `/superskillret:setup`, or edit `settings.json` yourself). Your first user prompts will also show a "setup is running" notice until `.installed` lands.
+
+Follow progress with `tail -f /tmp/superskillret-install.log`. Manage the daemon at any time with `/superskillret:setup` (re‑spawn — idempotent), `/superskillret:status`, and `/superskillret:stop`.
 
 ## How it works
 
