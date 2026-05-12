@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Bring superskillret to a ready state synchronously — runs install.sh if needed (~1-2 min on first time), spawns the daemon, and verifies retrieval end-to-end. Use right after /plugin install superskillret@hongchal so you don't have to wait through the lazy-fork on the first 1-2 user prompts. Idempotent — re-running on an already-ready plugin reports "Already ready" without side effects.
+description: Bring superskillret to a ready state synchronously — authorizes the plugin under Claude Code auto-mode (idempotent settings.json edit), runs install.sh if needed (~1-2 min on first time), spawns the daemon, and verifies retrieval end-to-end. Use right after /plugin install superskillret@hongchal so you don't have to wait through the lazy-fork on the first 1-2 user prompts. Idempotent — re-running on an already-ready plugin reports each phase as "already ready" without side effects.
 disable-model-invocation: true
 ---
 
