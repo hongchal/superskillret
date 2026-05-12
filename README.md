@@ -15,7 +15,11 @@ In a Claude Code session:
 /superskillret:setup
 ```
 
-`/superskillret:setup` (v0.3.1) is the synchronous fast path — it runs `scripts/install.sh` inline, spawns the daemon, and verifies retrieval end-to-end with live progress (~1–2 minutes on first run, idempotent on re-run). You can skip it and rely on the background `SessionStart` bootstrap instead: the same `scripts/install.sh` then forks in the background, creates a local venv, downloads the ONNX INT8 encoder and the prebuilt skill index from Hugging Face, and writes a `.installed` marker when it finishes.
+`/superskillret:setup` is the synchronous fast path — four phases with live progress: (1) auto-mode authorization (idempotent `autoMode.allow` entry in `~/.claude/settings.json` so the per-prompt `retrieve.py` hook isn't silently blocked by the classifier), (2) `scripts/install.sh`, (3) daemon spawn, (4) end-to-end verify. ~1–2 minutes on first run, idempotent on re-run.
+
+> **Auto-mode users:** if `/superskillret:setup` itself is blocked by the classifier on first install (it's a freshly installed external script the classifier hasn't seen yet), exit auto-mode once with `Shift+Tab`, run `/superskillret:setup`, then re-enter auto-mode. That single bypass lets phase 1 write the allow rule and every subsequent run/hook passes cleanly.
+
+You can skip `/setup` entirely and rely on the background `SessionStart` bootstrap instead: `scripts/install.sh` then forks in the background, creates a local venv, downloads the ONNX INT8 encoder and the prebuilt skill index from Hugging Face, and writes a `.installed` marker when it finishes. The background path does **not** write the auto-mode allow rule — under auto-mode, retrieval will be silently no-op'd until you run `/setup` or edit `settings.json` yourself.
 
 If you take the background path, your first user prompts get a short English notice asking you to wait. Either way, once `.installed` lands, skill retrieval activates automatically on every subsequent prompt.
 
