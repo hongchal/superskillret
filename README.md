@@ -17,13 +17,25 @@ In a Claude Code session:
 
 `/superskillret:setup` is the synchronous fast path — four phases with live progress: (1) auto-mode authorization (idempotent `autoMode.allow` entry in `~/.claude/settings.json` so the per-prompt `retrieve.py` hook isn't silently blocked by the classifier), (2) `scripts/install.sh`, (3) daemon spawn, (4) end-to-end verify. ~1–2 minutes on first run, idempotent on re-run.
 
+**Manual fallback — direct shell invocation.** If the slash command doesn't fire for any reason (older Claude Code build, plugin commands not surfaced yet, or you just want to run setup outside the Claude Code REPL), run the underlying CLI directly from any terminal:
+
+```bash
+# auto-detect the installed plugin path
+python3 "$(find ~/.claude/plugins/cache -path '*/superskillret/*/scripts/setup_cli.py' 2>/dev/null | head -1)"
+
+# or with the explicit ThakiCloud-marketplace path
+python3 ~/.claude/plugins/cache/thakicloud/superskillret/0.3.1/scripts/setup_cli.py
+```
+
+Same phases, same idempotency, same exit code. This is also what you point users at when `/superskillret:setup` gets gated by an auto-mode classifier that hasn't yet seen the allow rule.
+
 **Auto-mode users:** `/superskillret:setup` works cleanly under auto-mode because (a) the slash-command body is a single literal `python3 "/absolute/.../setup_cli.py"` — no `$(...)` subshells, no unresolved `${...}` — which passes Claude Code's static shell-permission check, and (b) explicit slash-command invocation is treated as direct user intent by the auto-mode classifier, so it isn't gated as "freshly installed external code." No `Shift+Tab` bypass required. Phase 1 of setup then writes the `autoMode.allow` entry so subsequent `retrieve.py` hook firings (auto-fired by CC, not by the user) are also classifier-trusted.
 
 You can skip `/setup` entirely and rely on the background `SessionStart` bootstrap instead: `scripts/install.sh` then forks in the background, creates a local venv, downloads the ONNX INT8 encoder and the prebuilt skill index from Hugging Face, and writes a `.installed` marker when it finishes. The background path does **not** write the auto-mode allow rule — under auto-mode, retrieval will be silently no-op'd until you run `/setup` or edit `settings.json` yourself.
 
 If you take the background path, your first user prompts get a short English notice asking you to wait. Either way, once `.installed` lands, skill retrieval activates automatically on every subsequent prompt.
 
-Follow progress with `tail -f /tmp/superskillret-install.log`. Inspect or reset the daemon at any time with `/superskillret:status` and `/superskillret:stop`.
+Follow progress with `tail -f /tmp/superskillret-install.log`. Manage the daemon at any time with `/superskillret:setup` (start / re‑spawn — idempotent), `/superskillret:status`, and `/superskillret:stop`.
 
 ## How it works
 
@@ -58,8 +70,9 @@ Two details not shown in the diagram but live in the code:
 - **Survives shell exits, dies on reboot.** The daemon is double‑forked into its own session, so closing your terminal does not kill it. A system reboot wipes `/tmp/superskillret.sock` and the next prompt re‑spawns.
 
 **Controls**
+- `/superskillret:setup` — **start / re‑spawn the daemon** synchronously and verify end‑to‑end. Idempotent — reports "Already ready" if the daemon is already live. Required after `/stop` when running under auto‑mode (the per‑prompt hook can't lazy‑respawn because the classifier strips `Bash(python*)`).
 - `/superskillret:status` — daemon PID, socket path, skill pool size, last‑retrieve latency.
-- `/superskillret:stop` — graceful shutdown. Next prompt lazy‑respawns.
+- `/superskillret:stop` — graceful shutdown. Next prompt lazy‑respawns (or run `/superskillret:setup` to bring it back explicitly).
 - `/superskillret:reset` — clear per‑session dedup state without restarting the daemon.
 - `tail -f /tmp/superskillret.log` — daemon log (started/loaded/served).
 - `tail -f /tmp/superskillret-install.log` — install log (first‑run only).
@@ -129,8 +142,9 @@ You don't interact with superskillret directly — it just runs on every user pr
 
 | Slash command | What it does |
 |---|---|
+| `/superskillret:setup` | **(Re)spawn the daemon** and verify retrieval end‑to‑end. Idempotent — reports "Already ready" if everything is healthy. Use this after `/stop`, after a crash, or whenever lazy‑respawn is silently blocked (auto‑mode classifier strips `Bash(python*)` so the per‑prompt hook can't start the daemon on its own). |
 | `/superskillret:status` | daemon pid, socket state, last 20 log lines |
-| `/superskillret:stop` | kill the daemon; it lazy‑starts again on the next prompt |
+| `/superskillret:stop` | kill the daemon. Next prompt lazy‑starts it again — **but under auto‑mode the hook is gated, so run `/superskillret:setup` to bring it back explicitly.** |
 | `/superskillret:reset` | clear the per‑session "already seen" skill memory so the next prompt can surface any skill again |
 | `/superskillret:add <path>` | validate a SKILL.md and add it to the index (v0.2.0). Stored in a writable user pool that survives system index upgrades. See [Adding custom skills](#adding-custom-skills) below. |
 | `/superskillret:list` | list all user‑added skills (the 16,783 system skills are not shown — too many) |
