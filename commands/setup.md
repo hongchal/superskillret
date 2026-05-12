@@ -7,29 +7,12 @@ disable-model-invocation: true
 ## superskillret :: synchronous setup
 
 ```!
-if [ -n "${CLAUDE_PLUGIN_ROOT}" ]; then
-  PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT}"
-elif [ -n "${CLAUDE_SKILL_DIR}" ]; then
-  PLUGIN_ROOT="$(dirname "${CLAUDE_SKILL_DIR}")"
-else
-  echo "FAIL: cannot resolve plugin root — neither CLAUDE_PLUGIN_ROOT nor CLAUDE_SKILL_DIR is set"
-  exit 1
-fi
-
-if [ ! -d "$PLUGIN_ROOT/scripts" ]; then
-  echo "FAIL: $PLUGIN_ROOT/scripts not found"
-  exit 1
-fi
-
-# setup_cli.py uses only stdlib until install.sh finishes and the venv
-# python is needed for the daemon — so the system python3 is fine here.
-PY="$(command -v python3)"
-if [ -z "$PY" ]; then
-  echo "FAIL: python3 not on PATH"
-  exit 1
-fi
-
-"$PY" "$PLUGIN_ROOT/scripts/setup_cli.py"
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/setup_cli.py"
 ```
 
 Surface the final "✓ Ready" line and the quick-reference block to the user. If a phase failed, restate which phase and which log to inspect.
+
+Notes on the one-liner:
+- Claude Code resolves `${CLAUDE_PLUGIN_ROOT}` to an absolute path before evaluating the bash body, so the static shell-permission check sees a fully literal command (no `$(...)` subshells, no unresolved `${...}`) and lets it through without needing a custom `Bash(...)` allow rule.
+- `setup_cli.py` self-resolves its plugin root via `__file__` and falls back to `CLAUDE_SKILL_DIR` internally if needed; we don't do that resolution in shell because conditional bash with subshells trips the same static check.
+- `python3` is the system python — `setup_cli.py` only uses stdlib until it invokes `scripts/install.sh`, at which point the plugin's own venv takes over.
