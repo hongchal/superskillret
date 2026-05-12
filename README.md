@@ -288,25 +288,24 @@ Model card eval (FP32): NDCG@15 = 0.7887, Recall@10 = 0.8542. The INT8 pipeline 
 - **First prompt just shows a "setup is running" notice.** Expected. `install.sh` is still downloading in the background. `tail -f /tmp/superskillret-install.log` to watch progress; retry the prompt in a minute.
 - **Hook times out.** `install.sh` is still going but exceeded `SUPERSKILLRET_SPAWN_WAIT` (default 180 s) from the hook's point of view. Usually harmless — the install continues; try another prompt. To raise the window: export `SUPERSKILLRET_SPAWN_WAIT=300`.
 - **No skills ever get injected.** Run `/superskillret:status`. If the socket is missing and ping fails, try `bash scripts/install.sh` directly in a terminal to see the full error. Common causes: HF repo unreachable, pip install failed.
-- **Running under Claude Code auto-mode — `/superskillret:setup` or every prompt is silently blocked.** Auto-mode's classifier strips broad allow rules like `Bash(python*)` on entry, so the plugin's `python3 retrieve.py` hook and `setup_cli.py` invocation can be denied without surfacing a user-visible error (you'll see the install complete but the daemon never spawns, and every prompt yields zero retrieved skills). Three options, easiest first:
-  1. **One-off**: exit auto-mode (Shift+Tab), submit one prompt to let `retrieve.py` spawn the daemon, then re-enter auto-mode. Subsequent prompts only need a `connect()` to the live socket and pass through.
-  2. **Permanent**: add a prose entry to `~/.claude/settings.json` under `autoMode.allow` describing the daemon. Validate with `claude auto-mode critique`:
+- **Running under Claude Code auto-mode — `/superskillret:setup` or every prompt is silently blocked.** Auto-mode's classifier strips broad allow rules like `Bash(python*)` on entry, so the plugin's `python3 retrieve.py` hook and `setup_cli.py` invocation can be denied without surfacing a user-visible error (you'll see the install complete but the daemon never spawns, and every prompt yields zero retrieved skills). Two paths:
+  1. **Run `/superskillret:setup` (recommended)** — phase 1 of setup now appends an idempotent `autoMode.allow` entry to `~/.claude/settings.json` for you, so the rest of setup and the per-prompt `retrieve.py` hook are no longer classifier-gated. If `/setup` itself is the thing being blocked on first install, exit auto-mode once (Shift+Tab), run `/superskillret:setup`, re-enter auto-mode — that single bypass authorizes everything.
+  2. **Manual reference** — if you'd rather edit `~/.claude/settings.json` yourself or want to see what `/setup` writes:
      ```json
      {
        "autoMode": {
          "allow": [
            "$defaults",
-           "Running superskillret hooks is allowed: the plugin runs a local Python daemon that injects relevant skills from the ThakiCloud/SKILLRET corpus into prompts. It downloads ONNX models from Hugging Face Hub on first install and communicates with retrieve.py via /tmp/superskillret.sock — no other network access."
+           "Running superskillret hooks is allowed: the plugin runs a local Python daemon that injects relevant skills from a 16,783-skill corpus into prompts. It downloads ONNX models from Hugging Face Hub on first install and communicates with retrieve.py via /tmp/superskillret.sock — no other network access."
          ]
        }
      }
      ```
-  3. **Manual daemon start**: spawn the daemon yourself once from your own terminal so the socket is live before any hook fires:
+     Validate with `claude auto-mode critique`. Or as a last-resort fallback, spawn the daemon yourself from a normal terminal — the user shell, not Claude, is the parent process, so the classifier doesn't apply:
      ```bash
      PLUGIN=$HOME/.claude/plugins/cache/thakicloud/superskillret/0.3.1
      nohup "$PLUGIN/.venv/bin/python" "$PLUGIN/scripts/daemon.py" > /tmp/superskillret.log 2>&1 & disown
      ```
-     This sidesteps the classifier entirely because the user shell, not Claude, is the parent process.
 - **Retrieved skills feel off.** Raise `SUPERSKILLRET_MIN_SCORE` to `0.40`–`0.45` so only strongly matching hits survive, and/or drop `SUPERSKILLRET_TOP_K` to 1–2.
 - **Context window fills up too fast.** Each hit is ~2–5 KB of `SKILL.md`; lower `TOP_K` and raise `MIN_SCORE`. See the token‑cost table above.
 - **Want to add a single custom skill.** Use `/superskillret:add <path-to-SKILL.md>` (v0.2.0). It validates the file, encodes it with the same ONNX INT8 encoder the daemon uses, and appends to a writable user pool. No daemon restart and no full index rebuild required. See [Adding custom skills](#adding-custom-skills).
