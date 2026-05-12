@@ -39,6 +39,29 @@ Two details not shown in the diagram but live in the code:
 - **First‑time setup is automatic.** A `SessionStart` hook (`scripts/bootstrap.sh`) forks `scripts/install.sh` in the background on first load to create the venv and download the encoder + index from Hugging Face, writing a `.installed` marker when done. While setup runs, the hook shows a polite English wait‑notice instead of retrieval.
 - **Per‑session dedup.** The daemon tracks, per `session_id`, which skills it already returned and skips them in future retrievals for that session, so the same `SKILL.md` isn't re‑injected into every turn. Clear with `/superskillret:reset`.
 
+### The daemon — what it is, what it costs, how to control it
+
+`superskillret` ships a small **local inference daemon** that owns the ONNX encoder and the 16,783‑skill index in memory. Treat it as a first‑class background service on your machine — like Docker Desktop or PiecesOS — not an internal implementation detail.
+
+**Footprint**
+- **RAM:** ~1.0–1.4 GB resident (ONNX encoder + INT8 embedding index + Python runtime). Lower than Tabnine local (1.5–2.5 GB), roughly comparable to GitHub Copilot's LSP under load.
+- **Disk:** ~800 MB total — 598 MB ONNX encoder under `.venv`, 152 MB skill metadata, 33 MB embeddings, plus the venv itself.
+- **Network:** outbound to `huggingface.co` only on first install (and on explicit index/encoder upgrades). No telemetry, no calls during retrieval.
+
+**Lifecycle**
+- **Lazy‑start.** First user prompt after a fresh install or system reboot spawns the daemon via `retrieve.py`. Cold start is ~20–30 s while the encoder loads; you'll see a wait‑notice on that one prompt.
+- **Long‑lived.** Once up, the daemon stays resident across Claude Code sessions — close and re‑open the CLI and the next prompt is warm (~150 ms round‑trip).
+- **Survives shell exits, dies on reboot.** The daemon is double‑forked into its own session, so closing your terminal does not kill it. A system reboot wipes `/tmp/superskillret.sock` and the next prompt re‑spawns.
+
+**Controls**
+- `/superskillret:status` — daemon PID, socket path, skill pool size, last‑retrieve latency.
+- `/superskillret:stop` — graceful shutdown. Next prompt lazy‑respawns.
+- `/superskillret:reset` — clear per‑session dedup state without restarting the daemon.
+- `tail -f /tmp/superskillret.log` — daemon log (started/loaded/served).
+- `tail -f /tmp/superskillret-install.log` — install log (first‑run only).
+
+If you only use the plugin occasionally and want to reclaim RAM between bursts of work, `/superskillret:stop` is the right hammer — the only cost is one cold start the next time you need it.
+
 ## Configuration
 
 ### Retrieval hyperparameters
@@ -265,6 +288,25 @@ Model card eval (FP32): NDCG@15 = 0.7887, Recall@10 = 0.8542. The INT8 pipeline 
 - **First prompt just shows a "setup is running" notice.** Expected. `install.sh` is still downloading in the background. `tail -f /tmp/superskillret-install.log` to watch progress; retry the prompt in a minute.
 - **Hook times out.** `install.sh` is still going but exceeded `SUPERSKILLRET_SPAWN_WAIT` (default 180 s) from the hook's point of view. Usually harmless — the install continues; try another prompt. To raise the window: export `SUPERSKILLRET_SPAWN_WAIT=300`.
 - **No skills ever get injected.** Run `/superskillret:status`. If the socket is missing and ping fails, try `bash scripts/install.sh` directly in a terminal to see the full error. Common causes: HF repo unreachable, pip install failed.
+- **Running under Claude Code auto-mode — `/superskillret:setup` or every prompt is silently blocked.** Auto-mode's classifier strips broad allow rules like `Bash(python*)` on entry, so the plugin's `python3 retrieve.py` hook and `setup_cli.py` invocation can be denied without surfacing a user-visible error (you'll see the install complete but the daemon never spawns, and every prompt yields zero retrieved skills). Three options, easiest first:
+  1. **One-off**: exit auto-mode (Shift+Tab), submit one prompt to let `retrieve.py` spawn the daemon, then re-enter auto-mode. Subsequent prompts only need a `connect()` to the live socket and pass through.
+  2. **Permanent**: add a prose entry to `~/.claude/settings.json` under `autoMode.allow` describing the daemon. Validate with `claude auto-mode critique`:
+     ```json
+     {
+       "autoMode": {
+         "allow": [
+           "$defaults",
+           "Running superskillret hooks is allowed: the plugin runs a local Python daemon that injects relevant skills from the ThakiCloud/SKILLRET corpus into prompts. It downloads ONNX models from Hugging Face Hub on first install and communicates with retrieve.py via /tmp/superskillret.sock — no other network access."
+         ]
+       }
+     }
+     ```
+  3. **Manual daemon start**: spawn the daemon yourself once from your own terminal so the socket is live before any hook fires:
+     ```bash
+     PLUGIN=$HOME/.claude/plugins/cache/thakicloud/superskillret/0.3.1
+     nohup "$PLUGIN/.venv/bin/python" "$PLUGIN/scripts/daemon.py" > /tmp/superskillret.log 2>&1 & disown
+     ```
+     This sidesteps the classifier entirely because the user shell, not Claude, is the parent process.
 - **Retrieved skills feel off.** Raise `SUPERSKILLRET_MIN_SCORE` to `0.40`–`0.45` so only strongly matching hits survive, and/or drop `SUPERSKILLRET_TOP_K` to 1–2.
 - **Context window fills up too fast.** Each hit is ~2–5 KB of `SKILL.md`; lower `TOP_K` and raise `MIN_SCORE`. See the token‑cost table above.
 - **Want to add a single custom skill.** Use `/superskillret:add <path-to-SKILL.md>` (v0.2.0). It validates the file, encodes it with the same ONNX INT8 encoder the daemon uses, and appends to a writable user pool. No daemon restart and no full index rebuild required. See [Adding custom skills](#adding-custom-skills).
