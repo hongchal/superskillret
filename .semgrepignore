@@ -1,0 +1,3 @@
+# Semgrep ignore rules
+# Markdown documentation files containing example remediation text
+.cursor/skills/code-security-review/rules/

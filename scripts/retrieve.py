@@ -375,12 +375,12 @@ def main():
         result = query_daemon(prompt, TOP_K, MIN_SCORE, session_id=session_id)
     except Exception as e:
         sys.stderr.write(f"superskillret: query failed: {e}\n")
-        emit(f"> _superskillret: query failed ({e})_\n")
+        emit("> _superskillret: query failed. See stderr for details._\n")
         return
 
     if result.get("error"):
         sys.stderr.write(f"superskillret: daemon error: {result['error']}\n")
-        emit(f"> _superskillret: daemon error ({result['error']})_\n")
+        emit("> _superskillret: daemon error. See stderr for details._\n")
         return
 
     hits = result.get("hits", [])

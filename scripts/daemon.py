@@ -44,6 +44,7 @@ Environment variables:
 import json
 import logging
 import os
+import secrets
 import signal
 import socket
 import sys
@@ -99,6 +100,13 @@ SEEN_TRACKING = os.environ.get("SUPERSKILLRET_SEEN_TRACKING", "0") == "1"
 # enough candidates to return TOP_K hits.
 OVERFETCH = int(os.environ.get("SUPERSKILLRET_OVERFETCH", "4"))
 
+MAX_REQ_BYTES = 4 * 1024 * 1024  # 4 MiB per request
+TOKEN_PATH = Path(os.environ.get(
+    "SUPERSKILLRET_TOKEN_FILE",
+    "/tmp/superskillret.token",
+))
+_PRIVILEGED_OPS = frozenset({"shutdown", "add_skill", "remove_user_skill"})
+
 QUERY_PROMPT = (
     "Instruct: Given a skill search query, retrieve relevant skills that match the query\n"
     "Query: "
@@ -139,7 +147,7 @@ class PyTorchEncoder:
 
         logging.info("loading PyTorch model %s on %s", MODEL_NAME, device)
         t0 = time.time()
-        self.model = SentenceTransformer(MODEL_NAME, trust_remote_code=True, device=device)
+        self.model = SentenceTransformer(MODEL_NAME, trust_remote_code=False, device=device)
         logging.info("model loaded in %.1fs", time.time() - t0)
 
     def encode(self, text: str) -> np.ndarray:
@@ -172,7 +180,7 @@ class ONNXEncoder:
             sess_options=sess_opts,
             providers=["CPUExecutionProvider"],
         )
-        self.tokenizer = AutoTokenizer.from_pretrained(str(onnx_dir), trust_remote_code=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(str(onnx_dir), trust_remote_code=False)
         self._input_names = {i.name for i in self.session.get_inputs()}
         logging.info("ONNX model loaded in %.1fs", time.time() - t0)
 
@@ -243,7 +251,7 @@ def load_index():
 
 
 class RetrievalServer:
-    def __init__(self):
+    def __init__(self, auth_token: str = ""):
         self.device = pick_device()
         self.encoder = make_encoder(self.device)
         self.embeddings, self.metadata, self.system_count = load_index()
@@ -252,8 +260,7 @@ class RetrievalServer:
         )
         self._lock = threading.Lock()
         self._index_lock = threading.Lock()
-        # LRU: session_id -> ordered set of skill indices already returned
-        # Keyed by session_id; when size exceeds MAX_SESSIONS we drop the oldest.
+        self._auth_token = auth_token
         self._seen: "OrderedDict[str, set[int]]" = OrderedDict()
         self._seen_lock = threading.Lock()
 
@@ -273,32 +280,32 @@ class RetrievalServer:
         t0 = time.time()
         with self._lock:
             q_emb = self.encoder.encode(QUERY_PROMPT + query)
-        sims = self.embeddings @ q_emb
 
-        # If dedup is on, over-fetch so that after skipping already-seen skills
-        # we still have enough candidates to return top_k.
-        use_dedup = SEEN_TRACKING and bool(session_id)
-        fetch_k = min(top_k * OVERFETCH, len(sims)) if use_dedup else top_k
+        with self._index_lock:
+            sims = self.embeddings @ q_emb
 
-        top_idx = np.argpartition(-sims, min(fetch_k, len(sims) - 1))[:fetch_k]
-        top_idx = top_idx[np.argsort(-sims[top_idx])]
+            use_dedup = SEEN_TRACKING and bool(session_id)
+            fetch_k = min(top_k * OVERFETCH, len(sims)) if use_dedup else top_k
 
-        seen = self._get_seen(session_id) if use_dedup else None
-        skipped = 0
-        hits = []
-        returned_indices = []
-        for idx in top_idx:
-            idx_int = int(idx)
-            score = float(sims[idx_int])
-            if score < min_score:
-                continue
-            if seen is not None and idx_int in seen:
-                skipped += 1
-                continue
-            hits.append({**self.metadata[idx_int], "score": score})
-            returned_indices.append(idx_int)
-            if len(hits) >= top_k:
-                break
+            top_idx = np.argpartition(-sims, min(fetch_k, len(sims) - 1))[:fetch_k]
+            top_idx = top_idx[np.argsort(-sims[top_idx])]
+
+            seen = self._get_seen(session_id) if use_dedup else None
+            skipped = 0
+            hits = []
+            returned_indices = []
+            for idx in top_idx:
+                idx_int = int(idx)
+                score = float(sims[idx_int])
+                if score < min_score:
+                    continue
+                if seen is not None and idx_int in seen:
+                    skipped += 1
+                    continue
+                hits.append({**self.metadata[idx_int], "score": score})
+                returned_indices.append(idx_int)
+                if len(hits) >= top_k:
+                    break
 
         if seen is not None:
             seen.update(returned_indices)
@@ -491,11 +498,19 @@ class RetrievalServer:
                 if not chunk:
                     break
                 data += chunk
+                if len(data) > MAX_REQ_BYTES:
+                    conn.sendall(json.dumps({"error": "payload_too_large"}).encode() + b"\n")
+                    return
                 if b"\n" in data:
                     break
             if not data.strip():
                 return
             req = json.loads(data.decode("utf-8"))
+            op = req.get("op", "")
+            if self._auth_token and op in _PRIVILEGED_OPS:
+                if req.get("auth") != self._auth_token:
+                    conn.sendall(json.dumps({"error": "auth_required"}).encode() + b"\n")
+                    return
             if req.get("op") == "ping":
                 # Return some health info too so retrieve.py can surface
                 # daemon readiness in the answer framing.
@@ -548,10 +563,10 @@ class RetrievalServer:
                 return
             result = self.search(prompt, top_k, min_score, session_id=session_id)
             conn.sendall(json.dumps(result, ensure_ascii=False).encode() + b"\n")
-        except Exception as e:
+        except Exception:
             logging.exception("request failed")
             try:
-                conn.sendall(json.dumps({"error": str(e)}).encode() + b"\n")
+                conn.sendall(json.dumps({"error": "internal_error"}).encode() + b"\n")
             except Exception:
                 pass
         finally:
@@ -587,15 +602,20 @@ def write_pidfile():
         f.write(str(os.getpid()))
 
 
+def init_auth_token() -> str:
+    token = os.environ.get("SUPERSKILLRET_SOCKET_SECRET") or secrets.token_hex(32)
+    TOKEN_PATH.write_text(token, encoding="utf-8")
+    os.chmod(str(TOKEN_PATH), 0o600)
+    logging.info("auth token written to %s", TOKEN_PATH)
+    return token
+
+
 def cleanup(*_):
-    try:
-        os.unlink(SOCKET_PATH)
-    except FileNotFoundError:
-        pass
-    try:
-        os.unlink(PID_PATH)
-    except FileNotFoundError:
-        pass
+    for p in (SOCKET_PATH, PID_PATH, str(TOKEN_PATH)):
+        try:
+            os.unlink(p)
+        except FileNotFoundError:
+            pass
     logging.info("daemon exiting")
     sys.exit(0)
 
@@ -607,7 +627,8 @@ def main():
     signal.signal(signal.SIGTERM, cleanup)
     signal.signal(signal.SIGINT, cleanup)
 
-    server = RetrievalServer()
+    auth_token = init_auth_token()
+    server = RetrievalServer(auth_token=auth_token)
     sock = bind_socket()
     write_pidfile()
     logging.info("daemon ready on %s", SOCKET_PATH)
