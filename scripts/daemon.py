@@ -608,7 +608,7 @@ def init_auth_token() -> str:
     token = os.environ.get("SUPERSKILLRET_SOCKET_SECRET") or secrets.token_hex(32)
     TOKEN_PATH.write_text(token, encoding="utf-8")
     os.chmod(str(TOKEN_PATH), 0o600)
-    logging.info("auth token written to %s", TOKEN_PATH)
+    logging.info("socket auth file written to %s", TOKEN_PATH)
     return token
 
 

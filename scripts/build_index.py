@@ -57,7 +57,7 @@ def main():
 
     print(f"Loading model on {args.device} ...")
     t0 = time.time()
-    model = SentenceTransformer(MODEL_NAME, trust_remote_code=True, device=args.device)
+    model = SentenceTransformer(MODEL_NAME, trust_remote_code=False, device=args.device)
     print(f"Model loaded in {time.time()-t0:.1f}s")
 
     print(f"Encoding {len(texts)} skills (batch={args.batch_size}) ...")
