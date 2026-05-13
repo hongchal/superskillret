@@ -219,7 +219,7 @@ The validator blocks the add if any of these fail:
 |---|---|
 | File must be valid UTF‑8 | ≤ 1 MB |
 | Frontmatter delimiters | `---` open and close |
-| Required fields | `name`, `description` |
+| Required fields | `name`, `description`, `body` (all three are concatenated into the embedding since the full-context scheme) |
 | `name` shape | `^[a-z0-9][a-z0-9-]{1,63}$` (kebab‑case, 2–64 chars) |
 | `description` length | 20 – 500 chars |
 | `body` length | ≥ 100 chars (warning if > 50 KB) |
@@ -292,7 +292,7 @@ superskillret/
 
 ## Retrieval pipeline internals
 
-1. Each skill's `(name | description)` is encoded at build time with the SKILLRET model; embeddings are L2‑normalized.
+1. Each skill's `(name | description | body)` is encoded at build time with the SKILLRET model (full-context scheme; earlier index versions used `name | description` only); embeddings are L2‑normalized. `/superskillret:add` uses the same `name | description | body` scheme at runtime so user-pool vectors land in the same space as the published system pool.
 2. The **published** embedding index is `skill_embeddings.npy` (FP16, 34 MB), built once with the FP32 PyTorch encoder for maximum retrieval quality and then cast to float16 for disk economy. The daemon will preferentially load INT8‑quantized variants (`skill_embeddings_int8.npy` + per‑vector `skill_embeddings_scale.npy`, ~17 MB + 67 KB; 75 % smaller, reconstruction error mean 2e‑4 / max 8e‑4) if you produce them locally via `scripts/quantize_onnx.py`. INT8 quantization is opt‑in — the HF dataset only ships the FP16 copy.
 3. At query time the daemon encodes `"Instruct: Given a skill search query, retrieve relevant skills that match the query\nQuery: <user prompt>"` (the query‑side prompt SKILLRET was trained with) and ranks skills by inner product.
 4. Hits below `MIN_SCORE` are dropped so off‑topic prompts (small talk, meta questions) emit an empty `additionalContext` and cost zero extra tokens.

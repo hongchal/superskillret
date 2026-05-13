@@ -326,10 +326,12 @@ class RetrievalServer:
                 return i
         return None
 
-    def _encode_skill(self, name: str, description: str) -> np.ndarray:
-        """Encode a skill's (name | description) into a normalized float32
-        vector, using the same skill-side format as build_index.py."""
-        text = f"{name} | {description}".strip()
+    def _encode_skill(self, name: str, description: str, body: str) -> np.ndarray:
+        """Encode a skill's (name | description | body) into a normalized
+        float32 vector, using the same skill-side format as build_index.py.
+        Body is included so the embedding captures keywords that appear only
+        inside the skill content, not just its summary."""
+        text = f"{name} | {description} | {body}".strip()
         with self._lock:
             vec = self.encoder.encode(text)
         return vec.astype(np.float32)
@@ -381,7 +383,7 @@ class RetrievalServer:
                     "error": "name, description, and body are required"}
 
         t_enc = time.time()
-        skill_vec_fp32 = self._encode_skill(name, description)
+        skill_vec_fp32 = self._encode_skill(name, description, body)
         encode_ms = (time.time() - t_enc) * 1000.0
 
         with self._index_lock:
