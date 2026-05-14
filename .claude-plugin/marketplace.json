@@ -11,8 +11,8 @@
         "source": "url",
         "url": "https://github.com/ThakiCloud/SUPERSKILLRET.git"
       },
-      "description": "Embedding-based skill retrieval. On every user prompt, picks the top-K relevant skills from a 16,783-skill pool (ThakiCloud/SKILLRET) and injects them as context, using the ThakiCloud/SkillRet-Embedding-0.6B encoder behind a long-running local daemon. v0.3.1 adds /superskillret:setup for one-shot sync install + daemon spawn. v0.3.0 PLUGIN_ROOT resolution. v0.2.9 Python 3.9 compat. v0.2.8 daemon health line + list/remove cli. v0.2.0–0.2.7 custom skill registration + UX fixes.",
-      "version": "0.3.1",
+      "description": "Embedding-based skill retrieval. On every user prompt, picks the top-K relevant skills from a 16,783-skill pool (ThakiCloud/SKILLRET) and injects them as context, using the ThakiCloud/SkillRet-Embedding-0.6B encoder behind a long-running local daemon. v0.3.2 adds SUPERSKILLRET_SCOPE env var to restrict retrieval to the user pool only (or system pool only) — useful for project-specific curated skill sets. v0.3.1 adds /superskillret:setup for one-shot sync install + daemon spawn. v0.3.0 PLUGIN_ROOT resolution. v0.2.9 Python 3.9 compat. v0.2.8 daemon health line + list/remove cli. v0.2.0–0.2.7 custom skill registration + UX fixes.",
+      "version": "0.3.2",
       "license": "MIT",
       "keywords": ["retrieval", "skills", "embedding", "rag", "hook"],
       "homepage": "https://github.com/ThakiCloud/SUPERSKILLRET"
