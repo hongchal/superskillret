@@ -5,9 +5,15 @@ so each incoming request completes in ~0.1-1s instead of reloading from scratch.
 
 Protocol (line-delimited JSON over Unix socket):
   Request : {"prompt": "...", "top_k": 3, "min_score": 0.25,
-             "session_id": "<claude code session uuid>"}
+             "session_id": "<claude code session uuid>",
+             "scope": "all" | "user" | "system"}
   Response: {"hits": [{"name": ..., "score": ..., "body": ..., ...}, ...],
              "latency_s": 0.12, "skipped_seen": 2}
+
+  `scope` (optional, default "all") restricts retrieval to a pool:
+    - "all"    : search the merged system + user index (default)
+    - "user"   : search only user-added skills
+    - "system" : search only system skills
 
   Ops: {"op": "ping"}           → {"ok": true}
        {"op": "shutdown"}       → {"ok": true}, daemon exits
@@ -276,13 +282,47 @@ class RetrievalServer:
                 logging.info("seen-set: evicted oldest session %s", evicted_sid[:8])
             return self._seen[session_id]
 
-    def search(self, query: str, top_k: int, min_score: float, session_id: str = ""):
+    def search(self, query: str, top_k: int, min_score: float,
+               session_id: str = "", scope: str = "all"):
+        """Top-K retrieval. `scope` restricts the candidate pool:
+            "all"    — system + user (default)
+            "user"   — only rows >= self.system_count
+            "system" — only rows <  self.system_count
+        Out-of-scope rows have their similarity set to -inf so they are
+        naturally dropped by the min_score filter downstream.
+        """
+        scope = (scope or "all").lower()
+        if scope not in ("all", "user", "system"):
+            scope = "all"
+
         t0 = time.time()
         with self._lock:
             q_emb = self.encoder.encode(QUERY_PROMPT + query)
 
         with self._index_lock:
             sims = self.embeddings @ q_emb
+
+            # Pool restriction: poison out-of-scope rows so they cannot make
+            # it through min_score even if argpartition surfaces them.
+            if scope == "user":
+                if len(sims) > self.system_count:
+                    sims[: self.system_count] = -np.inf
+                else:
+                    # No user-pool rows exist yet — short-circuit.
+                    return {
+                        "hits": [], "latency_s": time.time() - t0,
+                        "skipped_seen": 0, "scope": scope,
+                        "pool_empty": True,
+                    }
+            elif scope == "system":
+                if self.system_count > 0:
+                    sims[self.system_count:] = -np.inf
+                else:
+                    return {
+                        "hits": [], "latency_s": time.time() - t0,
+                        "skipped_seen": 0, "scope": scope,
+                        "pool_empty": True,
+                    }
 
             use_dedup = SEEN_TRACKING and bool(session_id)
             fetch_k = min(top_k * OVERFETCH, len(sims)) if use_dedup else top_k
@@ -314,6 +354,7 @@ class RetrievalServer:
             "hits": hits,
             "latency_s": time.time() - t0,
             "skipped_seen": skipped,
+            "scope": scope,
         }
 
     # ------------------------------------------------------------------
@@ -560,10 +601,12 @@ class RetrievalServer:
             top_k = int(req.get("top_k", 3))
             min_score = float(req.get("min_score", 0.25))
             session_id = req.get("session_id", "") or ""
+            scope = (req.get("scope") or "all")
             if not prompt.strip():
-                conn.sendall(json.dumps({"hits": [], "latency_s": 0.0, "skipped_seen": 0}).encode() + b"\n")
+                conn.sendall(json.dumps({"hits": [], "latency_s": 0.0, "skipped_seen": 0, "scope": scope}).encode() + b"\n")
                 return
-            result = self.search(prompt, top_k, min_score, session_id=session_id)
+            result = self.search(prompt, top_k, min_score,
+                                  session_id=session_id, scope=scope)
             conn.sendall(json.dumps(result, ensure_ascii=False).encode() + b"\n")
         except Exception:
             logging.exception("request failed")
