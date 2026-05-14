@@ -79,6 +79,44 @@ META_PATH = ROOT / "cache" / "skill_metadata.jsonl"
 USER_EMB_PATH = ROOT / "cache" / "user_skill_embeddings.npy"
 USER_META_PATH = ROOT / "cache" / "user_skill_metadata.jsonl"
 
+
+def _migrate_user_pool_from_sibling_versions() -> None:
+    """One-shot: when /plugin update brings up a new version, its cache/
+    starts empty and the user-added skills sitting in the previous
+    version's cache would be silently lost. On first boot of a fresh
+    install, scan sibling version dirs and copy the most-recently-modified
+    user pool over. Idempotent: skips when our own user pool already
+    exists."""
+    if USER_META_PATH.exists() or USER_EMB_PATH.exists():
+        return
+    versions_root = ROOT.parent  # .../superskillret/
+    if not versions_root.is_dir():
+        return
+    candidates = []
+    for sibling in versions_root.iterdir():
+        if not sibling.is_dir() or sibling.resolve() == ROOT.resolve():
+            continue
+        emb = sibling / "cache" / "user_skill_embeddings.npy"
+        meta = sibling / "cache" / "user_skill_metadata.jsonl"
+        if meta.exists():
+            candidates.append((meta.stat().st_mtime, emb, meta))
+    if not candidates:
+        return
+    candidates.sort(reverse=True)
+    _, src_emb, src_meta = candidates[0]
+    USER_META_PATH.parent.mkdir(parents=True, exist_ok=True)
+    import shutil
+    if src_meta.exists():
+        shutil.copy2(src_meta, USER_META_PATH)
+    if src_emb.exists():
+        shutil.copy2(src_emb, USER_EMB_PATH)
+    logging.info(
+        "migrated user pool from %s (%d bytes meta) into %s",
+        src_meta.parent.parent.name,
+        src_meta.stat().st_size,
+        USER_META_PATH.parent,
+    )
+
 SOCKET_PATH = os.environ.get("SUPERSKILLRET_SOCKET", "/tmp/superskillret.sock")
 PID_PATH = os.environ.get("SUPERSKILLRET_PIDFILE", "/tmp/superskillret.pid")
 LOG_PATH = os.environ.get("SUPERSKILLRET_LOG", "/tmp/superskillret.log")
@@ -112,6 +150,21 @@ TOKEN_PATH = Path(os.environ.get(
     "/tmp/superskillret.token",
 ))
 _PRIVILEGED_OPS = frozenset({"shutdown", "add_skill", "remove_user_skill"})
+
+
+def _read_plugin_version() -> str:
+    """Plugin's declared version, used by retrieve.py to detect drift after
+    /plugin update. Falls back to "" if plugin.json is missing or malformed
+    so the daemon never refuses to start over a metadata read."""
+    try:
+        import json as _json
+        data = _json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text())
+        return str(data.get("version") or "")
+    except Exception:
+        return ""
+
+
+PLUGIN_VERSION = _read_plugin_version()
 
 QUERY_PROMPT = (
     "Instruct: Given a skill search query, retrieve relevant skills that match the query\n"
@@ -564,6 +617,8 @@ class RetrievalServer:
                     "user_count": max(0, len(self.metadata) - self.system_count),
                     "embed_dim": self.embed_dim,
                     "backend": "onnx" if isinstance(self.encoder, ONNXEncoder) else "pytorch",
+                    "version": PLUGIN_VERSION,
+                    "pid": os.getpid(),
                 }
                 conn.sendall((json.dumps(reply) + "\n").encode("utf-8"))
                 return
@@ -656,21 +711,41 @@ def init_auth_token() -> str:
 
 
 def cleanup(*_):
-    for p in (SOCKET_PATH, PID_PATH, str(TOKEN_PATH)):
-        try:
-            os.unlink(p)
-        except FileNotFoundError:
-            pass
-    logging.info("daemon exiting")
+    """Drop only the files we own. Critical: a stale, non-owner daemon
+    receiving SIGTERM (e.g. user kills an orphan PID by hand) must NOT
+    unlink the live owner's socket/pidfile/token — doing so causes the
+    next retrieve hook to spawn yet another daemon, leading to a zombie
+    cascade. We assert ownership via the pidfile contents."""
+    own_pid = str(os.getpid())
+    is_owner = False
+    try:
+        is_owner = Path(PID_PATH).read_text().strip() == own_pid
+    except (FileNotFoundError, OSError):
+        is_owner = False
+
+    if is_owner:
+        for p in (SOCKET_PATH, PID_PATH, str(TOKEN_PATH)):
+            try:
+                os.unlink(p)
+            except FileNotFoundError:
+                pass
+        logging.info("daemon exiting pid=%s (owner cleanup)", own_pid)
+    else:
+        logging.info(
+            "daemon exiting pid=%s (non-owner; leaving socket/pidfile intact)",
+            own_pid,
+        )
     sys.exit(0)
 
 
 def main():
     setup_logging()
-    logging.info("daemon starting pid=%d", os.getpid())
+    logging.info("daemon starting pid=%d version=%s", os.getpid(), PLUGIN_VERSION or "<unknown>")
 
     signal.signal(signal.SIGTERM, cleanup)
     signal.signal(signal.SIGINT, cleanup)
+
+    _migrate_user_pool_from_sibling_versions()
 
     auth_token = init_auth_token()
     server = RetrievalServer(auth_token=auth_token)

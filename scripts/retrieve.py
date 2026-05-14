@@ -62,6 +62,47 @@ PYTHON = os.environ.get("SUPERSKILLRET_PYTHON") or (
 )
 SPAWN_WAIT = float(os.environ.get("SUPERSKILLRET_SPAWN_WAIT", "180"))
 DISABLED = os.environ.get("SUPERSKILLRET_DISABLE") == "1"
+# When "0", skip the version-drift hot-swap entirely (debug escape hatch).
+VERSION_HANDOVER = os.environ.get("SUPERSKILLRET_VERSION_HANDOVER", "1") != "0"
+
+
+def _my_version() -> str:
+    """This plugin install's declared version. Compared against ping reply
+    so we can detect a /plugin update where the on-disk plugin moved to
+    e.g. 0.3.3 but the long-running daemon is still 0.3.2."""
+    try:
+        data = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text())
+        return str(data.get("version") or "")
+    except Exception:
+        return ""
+
+
+MY_VERSION = _my_version()
+
+
+def _request_shutdown(timeout: float = 3.0) -> bool:
+    """Best-effort: ask the running daemon to exit cleanly via socket op.
+    Returns True if the daemon acknowledged. Falls through silently on any
+    socket error so the caller can fall back to a hard spawn race."""
+    try:
+        s = connect(timeout=timeout)
+        s.sendall(b'{"op": "shutdown"}\n')
+        reply = s.recv(1024)
+        s.close()
+        return b'"ok"' in reply
+    except Exception:
+        return False
+
+
+def _await_socket_release(deadline_s: float = 3.0) -> None:
+    """Wait until the old daemon's socket file is gone (its cleanup() has
+    fired) before spawning a replacement, so the new daemon's bind_socket
+    sees a clean slate instead of racing against a still-listening fd."""
+    end = time.time() + deadline_s
+    while time.time() < end:
+        if not os.path.exists(SOCKET_PATH):
+            return
+        time.sleep(0.1)
 
 
 def connect(timeout: float = 2.0):
@@ -386,6 +427,30 @@ def main():
                 f"for progress._\n"
             )
             return
+    elif VERSION_HANDOVER and MY_VERSION:
+        # /plugin update path: the on-disk plugin moved to a new version but
+        # the long-running daemon is still serving the old code/config (e.g.
+        # SUPERSKILLRET_SCOPE was added in 0.3.2 but a 0.3.1 daemon ignores
+        # it). Detect the drift via the version field in ping and hand over.
+        running = str(health.get("version") or "")
+        if running != MY_VERSION:
+            sys.stderr.write(
+                f"superskillret: version drift detected "
+                f"(daemon={running or '<none>'}, plugin={MY_VERSION}); "
+                f"requesting daemon handover\n"
+            )
+            _request_shutdown()
+            _await_socket_release()
+            spawn_daemon()
+            quick = float(os.environ.get("SUPERSKILLRET_QUICK_WAIT", "30"))
+            health = wait_for_daemon(quick)
+            if health is None:
+                emit(
+                    f"> _superskillret: handing over to v{MY_VERSION} "
+                    f"(daemon was v{running or '<none>'}). Retrieval resumes "
+                    f"on the next prompt — see `tail -f /tmp/superskillret.log`._\n"
+                )
+                return
 
     try:
         result = query_daemon(prompt, TOP_K, MIN_SCORE,
