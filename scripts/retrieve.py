@@ -14,6 +14,14 @@ Environment variables:
   SUPERSKILLRET_SOCKET      default /tmp/superskillret.sock
   SUPERSKILLRET_TOP_K       default 3   (how many skills to inject)
   SUPERSKILLRET_MIN_SCORE   default 0.30 (drop hits below this cosine score)
+  SUPERSKILLRET_SCOPE       default "all". Restrict retrieval to a pool:
+                              - "all"    : system + user (default)
+                              - "user"   : only skills added via /superskillret:add
+                              - "system" : only the prebuilt 16k+ system pool
+                            Useful for project-specific curation: set
+                            SUPERSKILLRET_SCOPE=user in a project's
+                            .claude/settings.json env block to retrieve only
+                            from your own curated skill set.
   SUPERSKILLRET_PYTHON      python used to spawn daemon (default current)
   SUPERSKILLRET_SPAWN_WAIT  seconds to wait for lazy daemon boot (default 90)
   SUPERSKILLRET_DISABLE     if "1", hook returns empty context
@@ -44,6 +52,9 @@ INSTALL_LOG = os.environ.get("SUPERSKILLRET_INSTALL_LOG", "/tmp/superskillret-in
 SOCKET_PATH = os.environ.get("SUPERSKILLRET_SOCKET", "/tmp/superskillret.sock")
 TOP_K = int(os.environ.get("SUPERSKILLRET_TOP_K", "3"))
 MIN_SCORE = float(os.environ.get("SUPERSKILLRET_MIN_SCORE", "0.30"))
+# Pool scope: "all" | "user" | "system". Anything else falls back to "all".
+_RAW_SCOPE = (os.environ.get("SUPERSKILLRET_SCOPE", "all") or "all").lower()
+SCOPE = _RAW_SCOPE if _RAW_SCOPE in ("all", "user", "system") else "all"
 # Prefer the plugin's own venv python (has torch, onnxruntime, etc).
 # Only fall back to whatever python is running this hook if the venv isn't set up yet.
 PYTHON = os.environ.get("SUPERSKILLRET_PYTHON") or (
@@ -51,6 +62,47 @@ PYTHON = os.environ.get("SUPERSKILLRET_PYTHON") or (
 )
 SPAWN_WAIT = float(os.environ.get("SUPERSKILLRET_SPAWN_WAIT", "180"))
 DISABLED = os.environ.get("SUPERSKILLRET_DISABLE") == "1"
+# When "0", skip the version-drift hot-swap entirely (debug escape hatch).
+VERSION_HANDOVER = os.environ.get("SUPERSKILLRET_VERSION_HANDOVER", "1") != "0"
+
+
+def _my_version() -> str:
+    """This plugin install's declared version. Compared against ping reply
+    so we can detect a /plugin update where the on-disk plugin moved to
+    e.g. 0.3.3 but the long-running daemon is still 0.3.2."""
+    try:
+        data = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text())
+        return str(data.get("version") or "")
+    except Exception:
+        return ""
+
+
+MY_VERSION = _my_version()
+
+
+def _request_shutdown(timeout: float = 3.0) -> bool:
+    """Best-effort: ask the running daemon to exit cleanly via socket op.
+    Returns True if the daemon acknowledged. Falls through silently on any
+    socket error so the caller can fall back to a hard spawn race."""
+    try:
+        s = connect(timeout=timeout)
+        s.sendall(b'{"op": "shutdown"}\n')
+        reply = s.recv(1024)
+        s.close()
+        return b'"ok"' in reply
+    except Exception:
+        return False
+
+
+def _await_socket_release(deadline_s: float = 3.0) -> None:
+    """Wait until the old daemon's socket file is gone (its cleanup() has
+    fired) before spawning a replacement, so the new daemon's bind_socket
+    sees a clean slate instead of racing against a still-listening fd."""
+    end = time.time() + deadline_s
+    while time.time() < end:
+        if not os.path.exists(SOCKET_PATH):
+            return
+        time.sleep(0.1)
 
 
 def connect(timeout: float = 2.0):
@@ -101,12 +153,14 @@ def wait_for_daemon(timeout: float) -> dict | None:
     return None
 
 
-def query_daemon(prompt: str, top_k: int, min_score: float, session_id: str = "") -> dict:
+def query_daemon(prompt: str, top_k: int, min_score: float,
+                  session_id: str = "", scope: str = "all") -> dict:
     req = json.dumps({
         "prompt": prompt,
         "top_k": top_k,
         "min_score": min_score,
         "session_id": session_id,
+        "scope": scope,
     }) + "\n"
     s = connect(timeout=60.0)
     try:
@@ -124,7 +178,8 @@ def query_daemon(prompt: str, top_k: int, min_score: float, session_id: str = ""
         s.close()
 
 
-def _daemon_health_line(health: dict | None, latency_s: float | None = None) -> str:
+def _daemon_health_line(health: dict | None, latency_s: float | None = None,
+                         scope: str = "all") -> str:
     """One human-readable line summarising daemon state for the user."""
     if health is None:
         return "_daemon: not reachable_"
@@ -133,21 +188,23 @@ def _daemon_health_line(health: dict | None, latency_s: float | None = None) -> 
     n_user = health.get("user_count", 0)
     backend = health.get("backend", "?")
     lat = f", {latency_s*1000:.0f} ms" if latency_s is not None else ""
+    scope_part = f", scope={scope}" if scope and scope != "all" else ""
     return (
         f"_daemon: ready ({n_total} skills = {n_sys} system + {n_user} user, "
-        f"backend={backend}{lat})_"
+        f"backend={backend}{scope_part}{lat})_"
     )
 
 
 def format_context(hits: list, health: dict | None = None,
-                    latency_s: float | None = None) -> str:
+                    latency_s: float | None = None,
+                    scope: str = "all") -> str:
     if not hits:
         return ""
     summary = ", ".join(
         f"`{h.get('name','?')}` ({h.get('score',0):.2f})" for h in hits
     )
     names_csv = ", ".join(f"`{h.get('name','?')}`" for h in hits)
-    health_line = _daemon_health_line(health, latency_s)
+    health_line = _daemon_health_line(health, latency_s, scope=scope)
     lines = [
         f"**superskillret retrieved top-{len(hits)}:** {summary}",
         f"_{health_line.strip('_')}_",
@@ -370,30 +427,71 @@ def main():
                 f"for progress._\n"
             )
             return
+    elif VERSION_HANDOVER and MY_VERSION:
+        # /plugin update path: the on-disk plugin moved to a new version but
+        # the long-running daemon is still serving the old code/config (e.g.
+        # SUPERSKILLRET_SCOPE was added in 0.3.2 but a 0.3.1 daemon ignores
+        # it). Detect the drift via the version field in ping and hand over.
+        running = str(health.get("version") or "")
+        if running != MY_VERSION:
+            sys.stderr.write(
+                f"superskillret: version drift detected "
+                f"(daemon={running or '<none>'}, plugin={MY_VERSION}); "
+                f"requesting daemon handover\n"
+            )
+            _request_shutdown()
+            _await_socket_release()
+            spawn_daemon()
+            quick = float(os.environ.get("SUPERSKILLRET_QUICK_WAIT", "30"))
+            health = wait_for_daemon(quick)
+            if health is None:
+                emit(
+                    f"> _superskillret: handing over to v{MY_VERSION} "
+                    f"(daemon was v{running or '<none>'}). Retrieval resumes "
+                    f"on the next prompt — see `tail -f /tmp/superskillret.log`._\n"
+                )
+                return
 
     try:
-        result = query_daemon(prompt, TOP_K, MIN_SCORE, session_id=session_id)
+        result = query_daemon(prompt, TOP_K, MIN_SCORE,
+                              session_id=session_id, scope=SCOPE)
     except Exception as e:
         sys.stderr.write(f"superskillret: query failed: {e}\n")
-        emit(f"> _superskillret: query failed ({e})_\n")
+        emit("> _superskillret: query failed. See stderr for details._\n")
         return
 
     if result.get("error"):
         sys.stderr.write(f"superskillret: daemon error: {result['error']}\n")
-        emit(f"> _superskillret: daemon error ({result['error']})_\n")
+        emit("> _superskillret: daemon error. See stderr for details._\n")
         return
 
     hits = result.get("hits", [])
     skipped_seen = int(result.get("skipped_seen", 0))
     latency = result.get("latency_s", 0)
-    context = format_context(hits, health=health, latency_s=latency)
+    pool_empty = bool(result.get("pool_empty"))
+    context = format_context(hits, health=health, latency_s=latency, scope=SCOPE)
 
     # When there are zero hits, the framing returns empty; still surface a
     # daemon-status notice so the user can see retrieval was attempted.
     if not context:
+        if pool_empty and SCOPE == "user":
+            empty_reason = (
+                "_superskillret: scope=user but no user-added skills yet — "
+                "register some with `/superskillret:add <path>` or unset "
+                "SUPERSKILLRET_SCOPE to fall back to the system pool_"
+            )
+        elif SCOPE != "all":
+            empty_reason = (
+                f"_superskillret: no skills in scope={SCOPE} above "
+                f"MIN_SCORE={MIN_SCORE:.2f} matched_"
+            )
+        else:
+            empty_reason = (
+                f"_superskillret: no skills above MIN_SCORE={MIN_SCORE:.2f} matched_"
+            )
         context = (
-            f"> {_daemon_health_line(health, latency)}\n"
-            f"> _superskillret: no skills above MIN_SCORE={MIN_SCORE:.2f} matched_\n"
+            f"> {_daemon_health_line(health, latency, scope=SCOPE)}\n"
+            f"> {empty_reason}\n"
         )
 
     if hits:

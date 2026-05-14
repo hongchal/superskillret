@@ -34,6 +34,15 @@ INJECTION_PATTERNS = [
     re.compile(r"</?\s*system[-_]?reminder\s*/?>", re.I),
     re.compile(r"<\|im_(start|end)\|>", re.I),
     re.compile(r"<\s*system\s*>", re.I),
+    re.compile(r"forget\s+(all\s+)?(prior|earlier|above)\s+(instructions|rules|context)", re.I),
+    re.compile(r"you\s+are\s+now\s+(a|an|in)\s+", re.I),
+    re.compile(r"act\s+as\s+if\s+(you|there)\s+(are|were)\s+no\s+rules", re.I),
+    re.compile(r"override\s+(system|safety|content)\s+(prompt|filter|policy)", re.I),
+    re.compile(r"(이전|위의|모든)\s*(지시|명령|규칙|제약).{0,10}(무시|잊어|무효|취소)", re.I),
+    re.compile(r"(시스템|안전)\s*(프롬프트|필터|정책).{0,10}(해제|무시|변경|우회)", re.I),
+    re.compile(r"```\s*(system|hidden|secret)", re.I),
+    re.compile(r"<\s*/?\s*(instruction|prompt|context)\s*>", re.I),
+    re.compile(r"[\u200b\u200c\u200d\u2060\ufeff]{3,}"),
 ]
 
 MAX_FILE_BYTES = 1_000_000

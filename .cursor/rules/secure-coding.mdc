@@ -1,0 +1,300 @@
+---
+description: "보안 코딩 가이드 - 코드 생성, 수정, 리팩토링, 버그 수정, API 구현, 함수 작성, 클래스 설계, DB 쿼리, 인증/인가 구현, 파일 처리, 암호화, 시크릿 관리, Dockerfile/Terraform/K8s YAML 작성 등 모든 코드 관련 작업 시 적용. OWASP/KISA 기반 보안 규칙."
+globs: ["**/*.py", "**/*.js", "**/*.ts", "**/*.jsx", "**/*.tsx", "**/*.java", "**/*.go", "**/*.php", "**/*.rs", "Dockerfile", "**/Dockerfile.*", "**/*.tf", "**/*.yaml", "**/*.yml", "**/*.sh"]
+alwaysApply: false
+---
+
+# 🔐 보안 코딩 가이드 (코드 생성용)
+
+> **목적**: AI 코드 생성 시 "이렇게 해라" 중심의 안전한 패턴 제시  
+> **버전**: v3.3 (2026-03-24)
+
+---
+
+## 📌 핵심 원칙
+
+> 코드 생성 시 **OWASP Top 10 (2021)**, **OWASP API Top 10 (2023)**, **KISA 시큐어코딩 가이드 47개 항목**을 준수하여 안전한 코드를 생성한다.
+> 아래는 이 기준들을 코드 생성 관점에서 9개 원칙으로 압축한 것이며, 모든 코드 생성·수정 시 이 원칙에 따라 구현한다.
+
+| # | 원칙 | 적용 방법 | 대응 기준 |
+|---|------|----------|----------|
+| 1 | **입력 검증 · 출력 인코딩** | 서버 측 화이트리스트 검증 + 컨텍스트별 출력 인코딩 | A03, A10, KISA 입력 1-15 |
+| 2 | **파라미터 바인딩** | SQL/명령어/LDAP/XPath 파라미터 바인딩, 포맷스트링·응답분할·버퍼 경계 검증 | A03, KISA 입력 1,3,9,11-14 |
+| 3 | **시크릿 관리** | 환경변수 또는 시크릿 매니저에서 로딩, 하드코딩 금지 | A02, KISA 보안 6 |
+| 4 | **안전한 암호화** | AES-128+ GCM, bcrypt/Argon2+솔트, 안전한 난수 | A02, KISA 보안 4,5,7,8,12 |
+| 5 | **에러 처리 · 로깅** | 일반 메시지 반환 + 보안 이벤트 기록 + 민감정보 로깅 금지 | A05, A09, KISA 에러 1-3 |
+| 6 | **인증/인가** | 서버 측 권한 검사, 소유권 검증, 기본 거부 | A01, A07, API1-2, API5, KISA 보안 1,2,9-16 |
+| 7 | **안전한 설계** | 비즈니스 로직 서버 재검증, Rate Limiting, 최소 권한 | A04, API4, API6 |
+| 8 | **공급망 · 무결성** | 패키지 버전 고정, Lock 파일, 안전한 역직렬화, CI/CD 보안 | A06, A08, API9 |
+| 9 | **코드 품질** | Null 체크, 자원 해제, 캡슐화, 정수 오버플로우, 재귀 깊이 제한 | KISA 입력 10, 코드오류 1-4, 캡슐화 1-5, 시간 2, API오용 1 |
+
+---
+
+> 아래는 핵심 원칙 각각의 상세 구현 가이드다.
+
+## 📌 #1 입력 검증 · 출력 인코딩
+
+- 서버 측 화이트리스트 기반 검증 (타입, 길이, 형식, 허용 문자)
+- 클라이언트 검증은 UX 용도일 뿐, 보안 검증은 반드시 서버 측
+- 정규화(Canonicalize) 후 검증 (이중 인코딩 우회 방지)
+- 출력 인코딩은 출력 시점에 컨텍스트별 적용:
+  - HTML → HTML 이스케이프 / JS → JS 이스케이프 / URL → URL 인코딩
+  - SQL은 파라미터 바인딩 (인코딩 아님)
+- 외부 API 응답도 사용자 입력과 동일하게 검증/이스케이프 후 사용
+- 외부 호출 시 타임아웃 필수: `requests.get(url, timeout=10)` / `axios.get(url, {timeout:10000})`
+- TLS 인증서 검증 비활성화 금지 (#4 참조)
+
+## 📌 #2 파라미터 바인딩
+
+- SQL: `cursor.execute("...id=%s", (uid,))` / `PreparedStatement` / `db.Query("...id=?", user)`
+- OS 명령: `subprocess.run([cmd, arg], shell=False)` / `execFile('cmd', [user])` / `ProcessBuilder`
+- 동적 쿼리 문자열 조합 (`f"SELECT...{user}"`) 절대 금지
+- ORM 사용 시에도 raw query에는 바인딩 적용
+- SQL 동적 식별자(`ORDER BY`, `GROUP BY`, 테이블/컬럼명): 파라미터 바인딩 불가 — 허용 컬럼 화이트리스트로 검증 후 삽입. `ORDER BY ${userInput}` 직접 보간 금지
+- SQL `LIKE` 와일드카드: 파라미터 바인딩된 `LIKE ?`도 사용자가 `%`/`_` 입력 시 전체 스캔 유발. LIKE 메타문자를 이스케이프 처리 (`LIKE ? ESCAPE '\'` + 입력에서 `%`, `_`, `\` 치환)
+- LDAP/XPath 등 쿼리 언어에도 동일 원칙 적용: 사용자 입력을 쿼리 문자열에 직접 삽입 금지, 이스케이프 또는 파라미터 바인딩 사용
+- 사용자 입력을 포맷 문자열로 사용 금지: `String.format(userInput, ...)` / `userInput % args` 금지
+- HTTP 응답 헤더에 사용자 입력 직접 삽입 금지: `\r\n` 제거 또는 프레임워크 헤더 API 사용 (응답 분할 방지)
+- 버퍼/배열 경계 검증: C/Go CGo/Rust unsafe 블록 등 저수준 코드에서 입력 크기를 버퍼 크기와 비교 검증 후 복사. 관리형 언어에서도 고정 크기 `byte[]` 사용 시 길이 검증
+
+## 📌 #3 시크릿 관리
+
+시크릿(API Key, DB PW, JWT Secret, Private Key 등)은 코드에 직접 작성하지 않는다.
+
+**언어별 환경변수 접근**:
+- Python: `os.environ.get("KEY")` / JS: `process.env.KEY` / Java: `System.getenv("KEY")` / Go: `os.Getenv("KEY")`
+- 복잡한 시크릿: AWS Secrets Manager, HashiCorp Vault, K8s Secrets 활용
+- `.gitignore`에 `.env`, `.env.*`, `*.pem`, `*.key`, `credentials.json` 반드시 포함. 이미 커밋된 시크릿은 git history에 잔존하므로 키 즉시 교체 필수
+
+## 📌 #4 안전한 암호화
+
+- 대칭 암호화: AES-128+ GCM (ECB 모드 금지). GCM 사용 시 동일 키로 nonce(IV) 재사용 절대 금지 — nonce 재사용 시 인증 키 노출로 암호문 위조 가능. 96비트 랜덤 nonce 또는 카운터 기반 nonce 사용
+- 비밀번호 해시: bcrypt / Argon2 + 솔트
+- 보안 용도 해시 전체: MD5, SHA1 금지 (비밀번호, HMAC, 토큰 생성, 파일 무결성 검증 등 모든 보안 목적). SHA-256 이상 사용
+- 키 길이: RSA 2048+, AES 128+
+- 보안 난수: Python `secrets` / JS `crypto.randomBytes` / Go `crypto/rand` (`random`·`Math.random` 금지)
+- 전송: TLS 1.2+. 인증서 검증 비활성화 금지 (`verify=False`, `rejectUnauthorized: false`, `InsecureSkipVerify: true` 등)
+- 암호화/인증 라이브러리는 검증된 것만 사용 (커스텀 구현 금지)
+
+## 📌 #5 에러 처리 · 로깅
+
+- 사용자 응답: `{ "error": "요청을 처리할 수 없습니다" }` (일반 메시지)
+- 서버 로깅: 상세 에러 + 스택트레이스 (내부용)
+- 노출 금지: 스택트레이스, DB 쿼리, 파일 경로, 서버 버전
+- 프로덕션 디버그 모드 금지: `DEBUG=False`, 스택트레이스 비활성화
+- 민감 정보 로깅 금지: 비밀번호, 토큰, 신용카드, 개인정보
+- 보안 이벤트 필수 기록: 로그인 성공/실패, 권한 변경, 민감 데이터 접근, 인증 토큰 발급/폐기
+- 빈 `catch` 블록 금지: 모든 예외에 최소한 로깅 포함
+- 최상위 `catch(Exception)` 지양: 구체적 예외 타입으로 처리
+
+## 📌 #6 인증/인가
+
+- 모든 보호 API에 서버 측 인증 미들웨어 적용
+- 객체 접근 시 소유권 검증 필수 (IDOR 방지: `if (resource.ownerId !== req.user.id) return 403`). 외부 API에 노출되는 리소스 ID는 UUID v4 사용 — 순차 정수 ID(`auto_increment`)는 열거 공격에 취약
+- JWT: `algorithms` 옵션 명시, `exp` 클레임 필수 검증, `aud` 클레임 검증 권장, Refresh Token 분리. 검증 실패 시 서명 없이 디코딩하여 payload를 사용하는 폴백 금지
+- 인증 플래그 기본값: `AUTH_ENABLED`, `REQUIRE_AUTH` 등 인증 on/off 플래그의 기본값은 반드시 `true` (인증 활성). 미설정 시 인증이 꺼지는 구조 금지
+- Mock/Bypass 인증: 개발용 mock 인증 미들웨어는 `NODE_ENV=production` 또는 프로덕션 환경에서 절대 활성화되지 않도록 guard 필수 (`if (process.env.NODE_ENV === 'production') throw`)
+- Brute Force 방어: 로그인 엔드포인트에 실패 횟수 기반 지연/잠금 적용 (5회 실패 → 계정 잠금 또는 점진적 지연). IP 기반 Rate Limiting과 병행
+- MFA: 민감 작업(비밀번호 변경, 결제, 관리자 기능)에 다중 인증 적용 권장. TOTP/WebAuthn 등 검증된 방식 사용
+- 비밀번호: 최소 8자+복잡도, **최대 128자 제한** (bcrypt 72바이트 내부 제한 + 초장문 HashDoS 방지). 해시 함수 호출 전에 길이 검증. 해시 알고리즘·솔트는 #4 참조
+- 쿠키: `HttpOnly`, `Secure`, `SameSite=Strict`
+- 세션: 로그인 성공 후 세션 ID 재발급, 적절한 만료 설정
+- 로그아웃: 서버 측 세션 무효화 필수. JWT 기반 인증 시 Refresh Token 즉시 폐기 + Access Token은 짧은 만료(15분 이하) 또는 토큰 블랙리스트 적용
+- OAuth/OpenID: `state` 파라미터 검증 필수, `redirect_uri` 화이트리스트 등록된 URL만 허용, Authorization Code는 1회성 사용
+- 비밀번호 재설정: 리셋 토큰은 `secrets.token_urlsafe(32)` 수준 난수, 만료 설정 (15~30분), 1회 사용 후 폐기, 사용자 존재 여부와 무관하게 동일 응답
+- 계정 열거 방지: 로그인·회원가입·비밀번호 재설정 실패 시 동일한 일반 메시지 반환 ("입력 정보를 확인해주세요"). 응답 시간도 일정하게 유지
+
+## 📌 #7 안전한 설계
+
+- 비즈니스 로직 검증은 반드시 서버 측: 가격, 수량, 할인율, 포인트 등 클라이언트 값을 신뢰하지 않음
+- Rate Limiting: 인증·결제·검색·파일 업로드 API에 속도 제한 적용
+- 파일 업로드: 확장자 화이트리스트 + MIME + 매직바이트 검증 + 크기 제한. 저장 위치는 웹 루트 외부 또는 별도 스토리지 서비스(S3 등) 사용. 직접 URL 접근 불가하도록 애플리케이션 레이어를 통해서만 제공. 저장 파일명은 서버에서 생성(UUID 등) — 원본 파일명(`file.filename`, `originalname`)을 저장 경로에 직접 사용 금지 (경로 조작 `../` 공격). 원본 파일명은 DB에만 보관
+- 파일 다운로드: `Content-Disposition: attachment; filename="safe_name"` 헤더 설정 필수 (인라인 렌더링에 의한 XSS 방지). 파일명에 사용자 입력 포함 시 특수문자 제거
+- 페이지네이션 필수: 무제한 목록 반환 금지, 최대 page size 설정
+- SSRF 방어: 사용자 제공 URL은 화이트리스트 검증. 내부/예약 IP 차단 (`127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `::1`, `169.254.169.254`, GCP `metadata.google.internal`, Azure `169.254.169.254/metadata`). HTTP 클라이언트의 리다이렉트 자동 추적 비활성화(`allow_redirects=False`, `followRedirects: false`) 또는 리다이렉트 대상 URL도 동일한 IP 차단 검증 적용
+- Open Redirect 방어: 리다이렉트 URL은 화이트리스트 검증
+- CSRF 방어: 상태 변경 요청에 CSRF 토큰 적용 (`SameSite=Strict` 쿠키와 병행)
+- 불필요한 HTTP 메서드 비활성화, 기본 계정/비밀번호 변경 필수
+- 보안 헤더 설정 (Express: `helmet` / FastAPI: `starlette.middleware` / Spring: Security):
+  - `X-Frame-Options: DENY`
+  - `X-Content-Type-Options: nosniff`
+  - `Strict-Transport-Security: max-age=31536000; includeSubDomains; preload`
+  - `Content-Security-Policy: default-src 'self'`
+  - `Access-Control-Allow-Origin`: 허용 도메인 명시 (`*` 금지). 요청 `Origin` 헤더를 그대로 반사(에코)하는 패턴 금지 (특히 `credentials: true` 조합 시 임의 도메인에서 인증된 요청 가능)
+  - `Referrer-Policy: strict-origin-when-cross-origin`
+  - `Permissions-Policy: camera=(), microphone=(), geolocation=()`
+  - `X-Powered-By`: 제거 (`app.disable("x-powered-by")`)
+
+## 📌 #8 공급망 · 무결성
+
+- 패키지 버전 고정 (`latest` 금지). Semantic Versioning 사용
+- Lock 파일 관리: `package-lock.json`, `poetry.lock`, `go.sum` 등 커밋 필수
+- 안전하지 않은 역직렬화 금지 (언어별 안전한 대안은 아래 "언어별 고유 패턴" 참조)
+- 외부 코드/라이브러리 실행 전 서명·해시 검증
+- CI/CD 시크릿은 시크릿 저장소 사용, 빌드 로그 노출 방지
+- 알려진 취약점 라이브러리 사용 금지, EOL 컴포넌트 교체
+- 미문서화 엔드포인트 제거, 레거시 API 버전 폐기
+
+## 📌 #9 코드 품질
+
+- Null 체크: 사용 전 null/undefined 검증 또는 Optional 패턴
+- 자원 해제 보장: `try-with-resources` (Java), `with` (Python), `defer` (Go)
+- 해제된 자원 재사용 금지 (커넥션, 포인터)
+- 변수는 선언과 동시에 초기화
+- 프로덕션 빌드에서 디버그 엔드포인트·로그·테스트 코드 제거
+- 주석에 시스템 구조·자격증명 작성 금지
+- API 응답 과다 노출 금지: DB 객체를 그대로 반환(`return user`, `SELECT *`)하지 않음. 응답 전용 DTO/직렬화 스키마로 허용 필드만 명시적 선택. `password_hash`, `internal_id`, `is_admin`, `secret` 등 내부 필드 노출 방지
+- 내부 데이터 구조 직접 노출 금지: 방어적 복사 또는 불변 객체로 반환 (Java: `Collections.unmodifiableList()`, Go: slice 복사, JS: `Object.freeze()` 또는 spread)
+- 내부 필드 캡슐화: mutable 필드는 private 선언 후 접근자 메서드로 제어
+- 정수 오버플로우 주의: Go/Java의 고정 크기 정수(`int32`, `int64`, `int`, `long`)는 overflow 시 silent wrap-around. 금액·수량 등 경계값 검증 필수. JS는 `Number.MAX_SAFE_INTEGER` 초과 시 `BigInt` 사용
+- 재귀/반복 깊이 제한: 사용자 제공 데이터(중첩 JSON, 트리 구조) 재귀 처리 시 최대 depth 제한 필수 (DoS 방지)
+- 파일 권한 설정: 민감 파일(설정, 키, 로그) 생성 시 제한적 권한 명시. Python: `os.open(path, flags, 0o600)` / Go: `os.OpenFile(path, flag, 0600)` / Java: `PosixFilePermissions.asFileAttribute("rw-------")`. 디렉토리는 0700. 기본값(0644) 그대로 사용 금지
+- 보안 결정에 DNS/hostname 사용 금지: `request.hostname`, 역방향 DNS로 접근 제어 금지 (DNS spoofing 가능). 인증 토큰 기반 검증 사용
+
+---
+
+## 🔍 사각지대 방어 패턴
+
+> 정적 분석 도구(Semgrep/Trivy)와 일반 AI 리뷰 양쪽에서 탐지 어려운 영역
+
+| 상황 | ✅ 안전한 패턴 |
+|------|--------------|
+| **정규식 (ReDoS)** | 반복 quantifier 중첩 금지 (`(a+)+`, `(a|a)*`). Python: `google-re2` / JS: `re2` 또는 타임아웃 |
+| **정규식 Injection** | `new RegExp(userInput)` / `re.compile(userInput)` 금지 — 사용자 입력의 메타문자(`.`, `*`, `+`, `()` 등)로 의도하지 않은 매칭·정보 추출 가능. 사용자 입력을 정규식에 포함 시 반드시 이스케이프 (JS: `escapeRegExp()` / Python: `re.escape()`) |
+| **비밀 값 비교 (Timing Attack)** | Python: `hmac.compare_digest(a, b)` / JS: `crypto.timingSafeEqual(a, b)` — `==`/`===` 금지 |
+| **템플릿 렌더링 (SSTI)** | 사용자 입력을 템플릿 문자열로 직접 렌더링 금지. Jinja2: `render_template(file, var=val)` / EJS: 변수 바인딩만 |
+| **객체 병합 (Prototype Pollution)** | JS: `_.merge`/`Object.assign` 시 `__proto__`, `constructor` 키 필터링 또는 `Map` 사용 |
+| **로그 출력 (Log Injection)** | 사용자 입력 로깅 시 `\n`, `\r` 제거. 구조화 로깅 (JSON) 권장 |
+| **민감 데이터 저장 (Client)** | JWT/토큰을 `localStorage`/`sessionStorage` 저장 금지 → HttpOnly 쿠키 사용 |
+| **postMessage 수신** | `window.addEventListener("message", handler)` → `event.origin` 화이트리스트 검증 필수 |
+| **이메일 전송** | 수신자/제목에 `\r\n` 제거 (헤더 주입 방지). 검증된 라이브러리 사용 |
+| **압축 해제** | 해제 전 압축 비율 검증 (100:1 초과 거부), 해제 후 총 크기 제한 |
+| **GraphQL** | depth limit (10~15), query complexity limit, 프로덕션 introspection 비활성화 |
+| **WebSocket** | Origin 헤더 검증, 연결 시 인증 토큰 확인, 메시지 스키마 검증, Rate Limiting |
+| **Mass Assignment** | 요청 본문에서 허용 필드만 명시적 추출 (`req.body.{name, email}`). 프레임워크 DTO/allowlist 활용 |
+| **TOCTOU (Race Condition)** | 파일 존재 확인 후 즉시 열기, 원자적 연산 사용 (`O_CREAT\|O_EXCL`, DB 트랜잭션) |
+| **비즈니스 로직 Race Condition** | 잔액·재고·포인트 등 check-then-act 패턴을 애플리케이션 레벨에서 분리 금지. DB 원자적 연산 사용: `UPDATE accounts SET balance = balance - ? WHERE id = ? AND balance >= ?`. 행 수 0이면 실패 처리. 또는 `SELECT ... FOR UPDATE` + 트랜잭션 |
+| **Host Header Injection** | `request.host`/`Host` 헤더를 URL·이메일 링크 생성에 직접 사용 금지. 서버 설정의 `ALLOWED_HOSTS` 또는 환경변수 `BASE_URL`에서 로딩 |
+| **HTTP Parameter Pollution** | 동일 파라미터명 다중 전달 시 프레임워크 동작 이해. 입력 검증에서 배열 형태 처리 확인, 필터 우회 방지 |
+| **Path Traversal** | 파일 경로 조합 시 `os.path.realpath()` / `path.resolve()` 후 base 경로 prefix 검증. `../` 차단만으로 불충분 (인코딩 우회 가능) |
+| **인증 토큰 URL 노출** | 인증 토큰을 URL 쿼리 파라미터(`?token=xxx`)로 전송 금지 (서버 로그·Referrer·브라우저 히스토리 노출). WebSocket 인증: 초기 핸드셰이크 쿠키 또는 연결 후 프로토콜 레벨 인증 메시지 사용 |
+
+---
+
+## 🤖 LLM/AI 보안 패턴
+
+> LLM API 호출·프록시·채팅 기능 구현 시 적용
+
+| 상황 | ✅ 안전한 패턴 |
+|------|--------------|
+| **Direct Prompt Injection 방어** | 클라이언트가 `system` 역할 메시지를 직접 지정하는 구조 금지. 서버에서 system prompt를 고정하고, 사용자 입력은 `user` 역할에만 바인딩 |
+| **Indirect Prompt Injection 방어** | LLM이 처리하는 외부 데이터(문서, 이메일, 웹 크롤링 결과 등)에 삽입된 명령으로 LLM 동작이 변조될 수 있음. 외부 데이터는 `user` 메시지와 구분된 별도 컨텍스트로 전달하고, LLM 출력에서 민감 작업(API 호출, 데이터 삭제 등) 실행 전 사용자 확인 단계 필수 |
+| **LLM 입력 PII 마스킹** | 사용자 입력을 외부/서드파티 LLM으로 전달하기 전 PII(이메일, 전화번호, 주민번호 등) 필터링·마스킹 적용. 규제 대상 데이터 식별 로직 필수 |
+| **LLM 출력 검증** | LLM 응답을 그대로 HTML/JS에 삽입 금지. 사용자 입력과 동일하게 컨텍스트별 이스케이프 적용 |
+| **데이터 보존 정책** | 대화 데이터에 보존 기간·자동 삭제 정책 구현. 삭제 API 제공. 로그에 프롬프트 원문 저장 시 보존 기간 명시 |
+| **멀티테넌트 격리** | 다중 사용자 LLM 앱에서 대화 컨텍스트·캐시·벡터DB를 사용자/세션별로 엄격히 격리. 타 사용자 대화 내용이 컨텍스트 윈도우에 혼입되지 않도록 설계 |
+
+---
+
+## 🏗️ IaC 보안 (인프라 코드)
+
+### Docker
+
+| 설정 | ✅ 안전한 패턴 |
+|------|--------------|
+| 사용자 | `USER appuser` — root 실행 금지 |
+| 베이스 이미지 | `FROM node:20-alpine` — 버전 고정, 최소 이미지. Multi-stage build로 빌드 도구·소스·dev 의존성을 프로덕션 이미지에서 제외 |
+| 시크릿 | Docker Secrets 또는 런타임 환경변수 주입 |
+| 파일 복사 | `COPY` 사용 — `ADD` 금지 (URL 자동 다운로드·tar 자동 해제로 인한 예기치 않은 파일 포함 위험) |
+| `.dockerignore` | `.env`, `.git`, `node_modules`, `*.pem` 포함 — 빌드 컨텍스트 유출 방지 |
+
+### Kubernetes
+
+| 설정 | ✅ 안전한 패턴 |
+|------|--------------|
+| 권한 | `privileged: false`, `allowPrivilegeEscalation: false` |
+| 사용자 | `runAsNonRoot: true` |
+| 파일시스템 | `readOnlyRootFilesystem: true` |
+| 리소스 제한 | `resources.limits.cpu/memory` 필수 설정 (DoS 방지) |
+| capabilities | `securityContext.capabilities.drop: [ALL]` — 필요한 capability만 `add`로 추가 |
+| 호스트 격리 | 호스트 네임스페이스 공유 금지 (`hostNetwork`, `hostPID`, `hostIPC` 등 모두 `false`) |
+| SA 토큰 | `automountServiceAccountToken: false` — API 접근 불필요 시 비활성화 |
+| 시크릿 | `secretKeyRef` 사용 |
+| 네트워크 격리 | `NetworkPolicy`로 Pod 간 통신 제한. 기본 deny-all 후 필요한 ingress/egress만 허용 |
+
+### Terraform
+
+| 설정 | ✅ 안전한 패턴 |
+|------|--------------|
+| 시크릿 | `var.access_key` + Vault/환경변수 |
+| 스토리지 | `acl = "private"` + Block Public Access |
+| 네트워크 | 특정 IP/CIDR만 허용 |
+
+### GitHub Actions
+
+| 설정 | ✅ 안전한 패턴 |
+|------|--------------|
+| 시크릿 | `::add-mask::` 로 마스킹 |
+| 액션 버전 | `uses: actions/checkout@b4ffde65f...` — **커밋 SHA로 고정** (태그는 변조 가능). 태그 사용 시 최소 `@v4.1.0` 형태로 고정, `@main`/`@latest` 금지 |
+| 권한 | `permissions: contents: read` — 최소 권한 |
+| Shell Injection | `${{ github.event.pull_request.title }}` 등 컨텍스트 값을 `run:` 블록에서 직접 문자열 보간 금지. `env:` 중간 변수로 바인딩 후 `$ENV_VAR`로 참조 |
+
+
+---
+
+## 🔧 언어별 고유 패턴
+
+> SQL 바인딩·명령 분리는 #2에서 다루므로, 여기서는 **언어 고유의 위험 API와 안전한 대안**만 정리한다.
+
+### Python
+
+| 상황 | ✅ 안전한 패턴 |
+|------|--------------|
+| YAML | `yaml.safe_load(data)` — `yaml.load()` 금지 (RCE) |
+| 역직렬화 | `json.loads(data)` — `pickle.loads()` 금지 (RCE) |
+| 동적 파싱 | `ast.literal_eval(expr)` — `eval()`/`exec()` 금지 |
+| 난수 (보안용) | `secrets.token_hex()`, `secrets.token_urlsafe()` — `random` 금지 |
+| HTTP 요청 | `requests.get(url, timeout=10)` — 타임아웃 필수 |
+| 보안 검사 | `if not condition: raise PermissionError()` — `assert`로 보안 검사 금지. `python -O` 최적화 모드에서 모든 `assert` 제거됨 → 인가 검사 무력화 |
+| 임시 파일 | `tempfile.NamedTemporaryFile()` 또는 `tempfile.mkstemp()` — `tempfile.mktemp()` 금지 (이름만 반환, 생성은 별도 → race condition). 민감 데이터 임시 저장 시 `delete=True`로 자동 삭제 |
+| XML (XXE) | `defusedxml.parse()` 사용. `lxml.etree.parse()` 시 `resolve_entities=False`, `no_network=True` 설정. `xml.etree` 기본은 안전하나 외부 엔티티 수동 활성화 금지 |
+
+### JavaScript/TypeScript
+
+| 상황 | ✅ 안전한 패턴 |
+|------|--------------|
+| DOM 출력 | `el.textContent = user` — HTML 필요 시 DOMPurify. `innerHTML` 금지. React: `dangerouslySetInnerHTML` 금지 — 반드시 DOMPurify 후 사용하거나 텍스트 렌더링으로 대체 |
+| JWT 검증 | `jwt.verify(t, secret, {algorithms:['HS256']})` — 알고리즘 명시, `exp`/`aud` 검증 활성화. 검증 실패 시 `jwt.decode()` 폴백 금지 |
+| NoSQL | 쿼리 객체 사용 + 입력 타입 검증 (`$` 연산자 입력 차단) |
+| 동적 파싱 | `JSON.parse(data)` — `eval()`/`new Function()` 금지 |
+| 난수 (보안용) | `crypto.randomBytes(32)` — `Math.random()` 금지 |
+| 보안 비교 | 보안 관련 비교(인증, 인가, 역할 검사 등)에 `===` 필수 — `==` 금지. 타입 강제 변환으로 `"0" == false`, `"" == 0` 등 예기치 않은 통과 가능. (비밀 값 비교는 사각지대 Timing Attack 참조) |
+| 패키지 선택 | Sandbox: `isolated-vm` / 날짜: `dayjs` / HTTP: `axios` / 암호화: Web Crypto API |
+
+### Java
+
+| 상황 | ✅ 안전한 패턴 |
+|------|--------------|
+| XML | `DocumentBuilderFactory` + XXE 비활성화 (`setFeature(DISALLOW_DOCTYPE)`) |
+| 역직렬화 | JSON 파서 (Jackson/Gson) — `ObjectInputStream.readObject()` 금지 |
+| 난수 (보안용) | `SecureRandom` — `java.util.Random` 금지 |
+| 로깅 | `logger.info("user={}", user)` — 문자열 연결 금지 (Log4Shell 방지) |
+
+### Go
+
+| 상황 | ✅ 안전한 패턴 |
+|------|--------------|
+| HTML 템플릿 | `html/template` — `text/template` 금지 (자동 이스케이프 없음) |
+| 난수 (보안용) | `crypto/rand` — `math/rand` 금지 |
+| HTTP 서버 | `ReadTimeout`, `WriteTimeout`, `IdleTimeout` 필수 설정 — 기본값 무제한이므로 DoS 위험 |
+| HTTP 클라이언트 | `&http.Client{Timeout: 10 * time.Second}` — `http.DefaultClient` 사용 금지 (타임아웃 없음). 외부 서비스 응답 지연 시 goroutine 고갈 |
+| error 처리 | 모든 error 반환값 검사 필수 — `val, _ := fn()` 패턴에서 보안 관련 함수(인증, 암호화, 파일 I/O)의 error 무시 금지. `if err != nil` 누락 시 인증 우회·데이터 손상 위험 |
+
+### PHP
+
+| 상황 | ✅ 안전한 패턴 |
+|------|--------------|
+| HTML 출력 | `htmlspecialchars($user, ENT_QUOTES, 'UTF-8')` — `echo $user` 금지 |
+| 코드 실행 | 화이트리스트 검증 — `eval()`, `system()`, `exec()` 금지 |
+
+---

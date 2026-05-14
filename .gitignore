@@ -37,3 +37,4 @@ superskillret.log
 
 # Bootstrap marker written by install.sh when setup finishes.
 .installed
+report/

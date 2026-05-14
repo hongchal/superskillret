@@ -9,7 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 RETRIEVE = ROOT / "scripts" / "retrieve.py"
-PYTHON = "/home/ubuntu/anaconda3/envs/swift_gkd_bw/bin/python3"
+PYTHON = os.environ.get("SUPERSKILLRET_SMOKE_PYTHON", sys.executable)
 
 QUERIES = [
     "help me set up a CI/CD pipeline for my Python project with github actions",

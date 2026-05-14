@@ -13,6 +13,7 @@ the .jsonl via O_APPEND (atomic per-line for writes ≤ PIPE_BUF).
 
 from __future__ import annotations
 
+import fcntl
 import io
 import json
 import os
@@ -102,14 +103,18 @@ def append_user_skill(
     line = json.dumps(record, ensure_ascii=False) + "\n"
     encoded = line.encode("utf-8")
     if len(encoded) > 4000:
-        # Larger than the safe-append threshold — fall back to read/rewrite
-        # so we don't risk an interleaved partial line.
-        existing_text = (
-            meta_path.read_text(encoding="utf-8") if meta_path.exists() else ""
-        )
-        tmp_meta = meta_path.with_suffix(".jsonl.tmp")
-        tmp_meta.write_text(existing_text + line, encoding="utf-8")
-        os.replace(tmp_meta, meta_path)
+        lock_path = meta_path.with_suffix(".jsonl.lock")
+        with open(lock_path, "w") as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            try:
+                existing_text = (
+                    meta_path.read_text(encoding="utf-8") if meta_path.exists() else ""
+                )
+                tmp_meta = meta_path.with_suffix(".jsonl.tmp")
+                tmp_meta.write_text(existing_text + line, encoding="utf-8")
+                os.replace(tmp_meta, meta_path)
+            finally:
+                fcntl.flock(lf, fcntl.LOCK_UN)
     else:
         with meta_path.open("ab") as f:
             f.write(encoded)
@@ -123,29 +128,35 @@ def remove_user_skill_by_name(
     """Remove a user skill by name. Returns True if removed, False if not
     found. The .npy is rewritten without the removed row.
     """
-    emb, meta = load_user_index(emb_path, meta_path, embed_dim=embed_dim)
-    keep_idx = [i for i, m in enumerate(meta) if m.get("name") != name]
-    if len(keep_idx) == len(meta):
-        return False
+    lock_path = meta_path.with_suffix(".jsonl.lock")
+    with open(lock_path, "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            emb, meta = load_user_index(emb_path, meta_path, embed_dim=embed_dim)
+            keep_idx = [i for i, m in enumerate(meta) if m.get("name") != name]
+            if len(keep_idx) == len(meta):
+                return False
 
-    if keep_idx:
-        new_emb = emb[keep_idx]
-        new_meta = [meta[i] for i in keep_idx]
-    else:
-        new_emb = np.zeros((0, embed_dim), dtype=np.float16)
-        new_meta = []
+            if keep_idx:
+                new_emb = emb[keep_idx]
+                new_meta = [meta[i] for i in keep_idx]
+            else:
+                new_emb = np.zeros((0, embed_dim), dtype=np.float16)
+                new_meta = []
 
-    tmp = emb_path.with_suffix(".npy.tmp")
-    with open(tmp, "wb") as f:
-        np.save(f, new_emb)
-    os.replace(tmp, emb_path)
+            tmp = emb_path.with_suffix(".npy.tmp")
+            with open(tmp, "wb") as f:
+                np.save(f, new_emb)
+            os.replace(tmp, emb_path)
 
-    tmp_meta = meta_path.with_suffix(".jsonl.tmp")
-    buf = io.StringIO()
-    for m in new_meta:
-        buf.write(json.dumps(m, ensure_ascii=False) + "\n")
-    tmp_meta.write_text(buf.getvalue(), encoding="utf-8")
-    os.replace(tmp_meta, meta_path)
+            tmp_meta = meta_path.with_suffix(".jsonl.tmp")
+            buf = io.StringIO()
+            for m in new_meta:
+                buf.write(json.dumps(m, ensure_ascii=False) + "\n")
+            tmp_meta.write_text(buf.getvalue(), encoding="utf-8")
+            os.replace(tmp_meta, meta_path)
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
     return True
 
 

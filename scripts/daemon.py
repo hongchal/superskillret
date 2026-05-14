@@ -5,9 +5,15 @@ so each incoming request completes in ~0.1-1s instead of reloading from scratch.
 
 Protocol (line-delimited JSON over Unix socket):
   Request : {"prompt": "...", "top_k": 3, "min_score": 0.25,
-             "session_id": "<claude code session uuid>"}
+             "session_id": "<claude code session uuid>",
+             "scope": "all" | "user" | "system"}
   Response: {"hits": [{"name": ..., "score": ..., "body": ..., ...}, ...],
              "latency_s": 0.12, "skipped_seen": 2}
+
+  `scope` (optional, default "all") restricts retrieval to a pool:
+    - "all"    : search the merged system + user index (default)
+    - "user"   : search only user-added skills
+    - "system" : search only system skills
 
   Ops: {"op": "ping"}           → {"ok": true}
        {"op": "shutdown"}       → {"ok": true}, daemon exits
@@ -44,6 +50,7 @@ Environment variables:
 import json
 import logging
 import os
+import secrets
 import signal
 import socket
 import sys
@@ -72,6 +79,44 @@ META_PATH = ROOT / "cache" / "skill_metadata.jsonl"
 USER_EMB_PATH = ROOT / "cache" / "user_skill_embeddings.npy"
 USER_META_PATH = ROOT / "cache" / "user_skill_metadata.jsonl"
 
+
+def _migrate_user_pool_from_sibling_versions() -> None:
+    """One-shot: when /plugin update brings up a new version, its cache/
+    starts empty and the user-added skills sitting in the previous
+    version's cache would be silently lost. On first boot of a fresh
+    install, scan sibling version dirs and copy the most-recently-modified
+    user pool over. Idempotent: skips when our own user pool already
+    exists."""
+    if USER_META_PATH.exists() or USER_EMB_PATH.exists():
+        return
+    versions_root = ROOT.parent  # .../superskillret/
+    if not versions_root.is_dir():
+        return
+    candidates = []
+    for sibling in versions_root.iterdir():
+        if not sibling.is_dir() or sibling.resolve() == ROOT.resolve():
+            continue
+        emb = sibling / "cache" / "user_skill_embeddings.npy"
+        meta = sibling / "cache" / "user_skill_metadata.jsonl"
+        if meta.exists():
+            candidates.append((meta.stat().st_mtime, emb, meta))
+    if not candidates:
+        return
+    candidates.sort(reverse=True)
+    _, src_emb, src_meta = candidates[0]
+    USER_META_PATH.parent.mkdir(parents=True, exist_ok=True)
+    import shutil
+    if src_meta.exists():
+        shutil.copy2(src_meta, USER_META_PATH)
+    if src_emb.exists():
+        shutil.copy2(src_emb, USER_EMB_PATH)
+    logging.info(
+        "migrated user pool from %s (%d bytes meta) into %s",
+        src_meta.parent.parent.name,
+        src_meta.stat().st_size,
+        USER_META_PATH.parent,
+    )
+
 SOCKET_PATH = os.environ.get("SUPERSKILLRET_SOCKET", "/tmp/superskillret.sock")
 PID_PATH = os.environ.get("SUPERSKILLRET_PIDFILE", "/tmp/superskillret.pid")
 LOG_PATH = os.environ.get("SUPERSKILLRET_LOG", "/tmp/superskillret.log")
@@ -98,6 +143,28 @@ SEEN_TRACKING = os.environ.get("SUPERSKILLRET_SEEN_TRACKING", "0") == "1"
 # Over-fetch factor when dedup is on so that after filtering we still have
 # enough candidates to return TOP_K hits.
 OVERFETCH = int(os.environ.get("SUPERSKILLRET_OVERFETCH", "4"))
+
+MAX_REQ_BYTES = 4 * 1024 * 1024  # 4 MiB per request
+TOKEN_PATH = Path(os.environ.get(
+    "SUPERSKILLRET_TOKEN_FILE",
+    "/tmp/superskillret.token",
+))
+_PRIVILEGED_OPS = frozenset({"shutdown", "add_skill", "remove_user_skill"})
+
+
+def _read_plugin_version() -> str:
+    """Plugin's declared version, used by retrieve.py to detect drift after
+    /plugin update. Falls back to "" if plugin.json is missing or malformed
+    so the daemon never refuses to start over a metadata read."""
+    try:
+        import json as _json
+        data = _json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text())
+        return str(data.get("version") or "")
+    except Exception:
+        return ""
+
+
+PLUGIN_VERSION = _read_plugin_version()
 
 QUERY_PROMPT = (
     "Instruct: Given a skill search query, retrieve relevant skills that match the query\n"
@@ -139,7 +206,7 @@ class PyTorchEncoder:
 
         logging.info("loading PyTorch model %s on %s", MODEL_NAME, device)
         t0 = time.time()
-        self.model = SentenceTransformer(MODEL_NAME, trust_remote_code=True, device=device)
+        self.model = SentenceTransformer(MODEL_NAME, trust_remote_code=False, device=device)
         logging.info("model loaded in %.1fs", time.time() - t0)
 
     def encode(self, text: str) -> np.ndarray:
@@ -172,7 +239,7 @@ class ONNXEncoder:
             sess_options=sess_opts,
             providers=["CPUExecutionProvider"],
         )
-        self.tokenizer = AutoTokenizer.from_pretrained(str(onnx_dir), trust_remote_code=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(str(onnx_dir), trust_remote_code=False)
         self._input_names = {i.name for i in self.session.get_inputs()}
         logging.info("ONNX model loaded in %.1fs", time.time() - t0)
 
@@ -243,7 +310,7 @@ def load_index():
 
 
 class RetrievalServer:
-    def __init__(self):
+    def __init__(self, auth_token: str = ""):
         self.device = pick_device()
         self.encoder = make_encoder(self.device)
         self.embeddings, self.metadata, self.system_count = load_index()
@@ -252,8 +319,7 @@ class RetrievalServer:
         )
         self._lock = threading.Lock()
         self._index_lock = threading.Lock()
-        # LRU: session_id -> ordered set of skill indices already returned
-        # Keyed by session_id; when size exceeds MAX_SESSIONS we drop the oldest.
+        self._auth_token = auth_token
         self._seen: "OrderedDict[str, set[int]]" = OrderedDict()
         self._seen_lock = threading.Lock()
 
@@ -269,36 +335,70 @@ class RetrievalServer:
                 logging.info("seen-set: evicted oldest session %s", evicted_sid[:8])
             return self._seen[session_id]
 
-    def search(self, query: str, top_k: int, min_score: float, session_id: str = ""):
+    def search(self, query: str, top_k: int, min_score: float,
+               session_id: str = "", scope: str = "all"):
+        """Top-K retrieval. `scope` restricts the candidate pool:
+            "all"    — system + user (default)
+            "user"   — only rows >= self.system_count
+            "system" — only rows <  self.system_count
+        Out-of-scope rows have their similarity set to -inf so they are
+        naturally dropped by the min_score filter downstream.
+        """
+        scope = (scope or "all").lower()
+        if scope not in ("all", "user", "system"):
+            scope = "all"
+
         t0 = time.time()
         with self._lock:
             q_emb = self.encoder.encode(QUERY_PROMPT + query)
-        sims = self.embeddings @ q_emb
 
-        # If dedup is on, over-fetch so that after skipping already-seen skills
-        # we still have enough candidates to return top_k.
-        use_dedup = SEEN_TRACKING and bool(session_id)
-        fetch_k = min(top_k * OVERFETCH, len(sims)) if use_dedup else top_k
+        with self._index_lock:
+            sims = self.embeddings @ q_emb
 
-        top_idx = np.argpartition(-sims, min(fetch_k, len(sims) - 1))[:fetch_k]
-        top_idx = top_idx[np.argsort(-sims[top_idx])]
+            # Pool restriction: poison out-of-scope rows so they cannot make
+            # it through min_score even if argpartition surfaces them.
+            if scope == "user":
+                if len(sims) > self.system_count:
+                    sims[: self.system_count] = -np.inf
+                else:
+                    # No user-pool rows exist yet — short-circuit.
+                    return {
+                        "hits": [], "latency_s": time.time() - t0,
+                        "skipped_seen": 0, "scope": scope,
+                        "pool_empty": True,
+                    }
+            elif scope == "system":
+                if self.system_count > 0:
+                    sims[self.system_count:] = -np.inf
+                else:
+                    return {
+                        "hits": [], "latency_s": time.time() - t0,
+                        "skipped_seen": 0, "scope": scope,
+                        "pool_empty": True,
+                    }
 
-        seen = self._get_seen(session_id) if use_dedup else None
-        skipped = 0
-        hits = []
-        returned_indices = []
-        for idx in top_idx:
-            idx_int = int(idx)
-            score = float(sims[idx_int])
-            if score < min_score:
-                continue
-            if seen is not None and idx_int in seen:
-                skipped += 1
-                continue
-            hits.append({**self.metadata[idx_int], "score": score})
-            returned_indices.append(idx_int)
-            if len(hits) >= top_k:
-                break
+            use_dedup = SEEN_TRACKING and bool(session_id)
+            fetch_k = min(top_k * OVERFETCH, len(sims)) if use_dedup else top_k
+
+            top_idx = np.argpartition(-sims, min(fetch_k, len(sims) - 1))[:fetch_k]
+            top_idx = top_idx[np.argsort(-sims[top_idx])]
+
+            seen = self._get_seen(session_id) if use_dedup else None
+            skipped = 0
+            hits = []
+            returned_indices = []
+            for idx in top_idx:
+                idx_int = int(idx)
+                score = float(sims[idx_int])
+                if score < min_score:
+                    continue
+                if seen is not None and idx_int in seen:
+                    skipped += 1
+                    continue
+                hits.append({**self.metadata[idx_int], "score": score})
+                returned_indices.append(idx_int)
+                if len(hits) >= top_k:
+                    break
 
         if seen is not None:
             seen.update(returned_indices)
@@ -307,6 +407,7 @@ class RetrievalServer:
             "hits": hits,
             "latency_s": time.time() - t0,
             "skipped_seen": skipped,
+            "scope": scope,
         }
 
     # ------------------------------------------------------------------
@@ -319,10 +420,12 @@ class RetrievalServer:
                 return i
         return None
 
-    def _encode_skill(self, name: str, description: str) -> np.ndarray:
-        """Encode a skill's (name | description) into a normalized float32
-        vector, using the same skill-side format as build_index.py."""
-        text = f"{name} | {description}".strip()
+    def _encode_skill(self, name: str, description: str, body: str) -> np.ndarray:
+        """Encode a skill's (name | description | body) into a normalized
+        float32 vector, using the same skill-side format as build_index.py.
+        Body is included so the embedding captures keywords that appear only
+        inside the skill content, not just its summary."""
+        text = f"{name} | {description} | {body}".strip()
         with self._lock:
             vec = self.encoder.encode(text)
         return vec.astype(np.float32)
@@ -374,7 +477,7 @@ class RetrievalServer:
                     "error": "name, description, and body are required"}
 
         t_enc = time.time()
-        skill_vec_fp32 = self._encode_skill(name, description)
+        skill_vec_fp32 = self._encode_skill(name, description, body)
         encode_ms = (time.time() - t_enc) * 1000.0
 
         with self._index_lock:
@@ -491,11 +594,19 @@ class RetrievalServer:
                 if not chunk:
                     break
                 data += chunk
+                if len(data) > MAX_REQ_BYTES:
+                    conn.sendall(json.dumps({"error": "payload_too_large"}).encode() + b"\n")
+                    return
                 if b"\n" in data:
                     break
             if not data.strip():
                 return
             req = json.loads(data.decode("utf-8"))
+            op = req.get("op", "")
+            if self._auth_token and op in _PRIVILEGED_OPS:
+                if req.get("auth") != self._auth_token:
+                    conn.sendall(json.dumps({"error": "auth_required"}).encode() + b"\n")
+                    return
             if req.get("op") == "ping":
                 # Return some health info too so retrieve.py can surface
                 # daemon readiness in the answer framing.
@@ -506,6 +617,8 @@ class RetrievalServer:
                     "user_count": max(0, len(self.metadata) - self.system_count),
                     "embed_dim": self.embed_dim,
                     "backend": "onnx" if isinstance(self.encoder, ONNXEncoder) else "pytorch",
+                    "version": PLUGIN_VERSION,
+                    "pid": os.getpid(),
                 }
                 conn.sendall((json.dumps(reply) + "\n").encode("utf-8"))
                 return
@@ -543,15 +656,17 @@ class RetrievalServer:
             top_k = int(req.get("top_k", 3))
             min_score = float(req.get("min_score", 0.25))
             session_id = req.get("session_id", "") or ""
+            scope = (req.get("scope") or "all")
             if not prompt.strip():
-                conn.sendall(json.dumps({"hits": [], "latency_s": 0.0, "skipped_seen": 0}).encode() + b"\n")
+                conn.sendall(json.dumps({"hits": [], "latency_s": 0.0, "skipped_seen": 0, "scope": scope}).encode() + b"\n")
                 return
-            result = self.search(prompt, top_k, min_score, session_id=session_id)
+            result = self.search(prompt, top_k, min_score,
+                                  session_id=session_id, scope=scope)
             conn.sendall(json.dumps(result, ensure_ascii=False).encode() + b"\n")
-        except Exception as e:
+        except Exception:
             logging.exception("request failed")
             try:
-                conn.sendall(json.dumps({"error": str(e)}).encode() + b"\n")
+                conn.sendall(json.dumps({"error": "internal_error"}).encode() + b"\n")
             except Exception:
                 pass
         finally:
@@ -587,27 +702,53 @@ def write_pidfile():
         f.write(str(os.getpid()))
 
 
+def init_auth_token() -> str:
+    token = os.environ.get("SUPERSKILLRET_SOCKET_SECRET") or secrets.token_hex(32)
+    TOKEN_PATH.write_text(token, encoding="utf-8")
+    os.chmod(str(TOKEN_PATH), 0o600)
+    logging.info("socket auth file written to %s", TOKEN_PATH)
+    return token
+
+
 def cleanup(*_):
+    """Drop only the files we own. Critical: a stale, non-owner daemon
+    receiving SIGTERM (e.g. user kills an orphan PID by hand) must NOT
+    unlink the live owner's socket/pidfile/token — doing so causes the
+    next retrieve hook to spawn yet another daemon, leading to a zombie
+    cascade. We assert ownership via the pidfile contents."""
+    own_pid = str(os.getpid())
+    is_owner = False
     try:
-        os.unlink(SOCKET_PATH)
-    except FileNotFoundError:
-        pass
-    try:
-        os.unlink(PID_PATH)
-    except FileNotFoundError:
-        pass
-    logging.info("daemon exiting")
+        is_owner = Path(PID_PATH).read_text().strip() == own_pid
+    except (FileNotFoundError, OSError):
+        is_owner = False
+
+    if is_owner:
+        for p in (SOCKET_PATH, PID_PATH, str(TOKEN_PATH)):
+            try:
+                os.unlink(p)
+            except FileNotFoundError:
+                pass
+        logging.info("daemon exiting pid=%s (owner cleanup)", own_pid)
+    else:
+        logging.info(
+            "daemon exiting pid=%s (non-owner; leaving socket/pidfile intact)",
+            own_pid,
+        )
     sys.exit(0)
 
 
 def main():
     setup_logging()
-    logging.info("daemon starting pid=%d", os.getpid())
+    logging.info("daemon starting pid=%d version=%s", os.getpid(), PLUGIN_VERSION or "<unknown>")
 
     signal.signal(signal.SIGTERM, cleanup)
     signal.signal(signal.SIGINT, cleanup)
 
-    server = RetrievalServer()
+    _migrate_user_pool_from_sibling_versions()
+
+    auth_token = init_auth_token()
+    server = RetrievalServer(auth_token=auth_token)
     sock = bind_socket()
     write_pidfile()
     logging.info("daemon ready on %s", SOCKET_PATH)

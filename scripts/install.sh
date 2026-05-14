@@ -22,8 +22,8 @@ VENV="$ROOT/.venv"
 PY="$VENV/bin/python"
 PIP="$VENV/bin/pip"
 
-INDEX_REPO="${SUPERSKILLRET_INDEX_REPO:-youngryankim/superskillret-index}"
-ONNX_REPO="${SUPERSKILLRET_ONNX_REPO:-youngryankim/superskillret-onnx-int8}"
+INDEX_REPO="${SUPERSKILLRET_INDEX_REPO:-ThakiCloud/superskillret-index}"
+ONNX_REPO="${SUPERSKILLRET_ONNX_REPO:-ThakiCloud/superskillret-onnx-int8}"
 
 log() { printf '[superskillret] %s\n' "$*"; }
 

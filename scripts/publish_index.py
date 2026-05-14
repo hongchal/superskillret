@@ -2,7 +2,7 @@
 
 Usage:
     HF_TOKEN=hf_xxx python scripts/publish_index.py \
-        --repo youngryankim/superskillret-index --private
+        --repo ThakiCloud/superskillret-index --private
 
 Uploads:
     cache/skill_embeddings.npy
@@ -54,7 +54,7 @@ Prebuilt embedding index for the [superskillret](../superskillret) Claude Code p
 
 ```python
 from huggingface_hub import snapshot_download
-snapshot_download(repo_id="youngryankim/superskillret-index",
+snapshot_download(repo_id="ThakiCloud/superskillret-index",
                   repo_type="dataset",
                   local_dir="cache/")
 ```
@@ -65,7 +65,7 @@ Downstream consumers should check `VERSION` against their cached copy before reu
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--repo", required=True, help="e.g. youngryankim/superskillret-index")
+    ap.add_argument("--repo", required=True, help="e.g. ThakiCloud/superskillret-index")
     ap.add_argument("--private", action="store_true")
     args = ap.parse_args()
 

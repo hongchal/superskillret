@@ -32,6 +32,17 @@ DAEMON_LOG = os.environ.get("SUPERSKILLRET_LOG", "/tmp/superskillret.log")
 DAEMON_SCRIPT = PLUGIN_ROOT / "scripts" / "daemon.py"
 VENV_PYTHON = PLUGIN_ROOT / ".venv" / "bin" / "python"
 DAEMON_SPAWN_WAIT = float(os.environ.get("SUPERSKILLRET_SPAWN_WAIT", "60"))
+TOKEN_PATH = Path(os.environ.get(
+    "SUPERSKILLRET_TOKEN_FILE", "/tmp/superskillret.token"
+))
+_PRIVILEGED_OPS = frozenset({"shutdown", "add_skill", "remove_user_skill"})
+
+
+def _read_auth_token() -> str:
+    try:
+        return TOKEN_PATH.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return ""
 
 
 def ping_daemon(timeout: float = 1.0) -> bool:
@@ -105,6 +116,11 @@ def daemon_request(req: dict, timeout: float = 30.0) -> dict:
     or protocol failures.
     """
     ensure_daemon()
+    op = req.get("op", "")
+    if op in _PRIVILEGED_OPS and "auth" not in req:
+        token = _read_auth_token()
+        if token:
+            req = {**req, "auth": token}
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(timeout)
     try:

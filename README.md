@@ -108,8 +108,8 @@ Bump `MIN_SCORE` if you want fewer, more relevant hits; lower it if you want mor
 | `SUPERSKILLRET_DISABLE` | unset | set to `1` to turn the hook into a no‑op (retrieval is silently skipped) |
 | `SUPERSKILLRET_SPAWN_WAIT` | `180` | seconds the hook waits for a lazy‑spawned daemon to come up. Raise on slow networks / first‑time installs. |
 | `SUPERSKILLRET_SEEN_TRACKING` | **`0`** (since v0.2.5) | per‑session dedup. Off by default: a skill's active framing (MUST/SHOULD directives) only stays "current authoritative reference material" while the skill is re-injected each turn, so dedup left the body in history but expired its active intent. Set to `1` if you'd rather save the ~5-7K tokens per repeated retrieve and accept that the same query may produce different behaviour across turns. |
-| `SUPERSKILLRET_ONNX_REPO` | `youngryankim/superskillret-onnx-int8` | HF repo the encoder is fetched from. Override to use your own fine‑tuned encoder. |
-| `SUPERSKILLRET_INDEX_REPO` | `youngryankim/superskillret-index` | HF repo the prebuilt index is fetched from. Override if you publish your own skill corpus. |
+| `SUPERSKILLRET_ONNX_REPO` | `ThakiCloud/superskillret-onnx-int8` | HF repo the encoder is fetched from. Override to use your own fine‑tuned encoder. |
+| `SUPERSKILLRET_INDEX_REPO` | `ThakiCloud/superskillret-index` | HF repo the prebuilt index is fetched from. Override if you publish your own skill corpus. |
 
 Variables can be set in the shell, in `~/.claude/settings.json` under `"env": {...}`, or in the hook `command` itself. A handful of lower‑level knobs (socket/pid/log paths, ONNX dir override, session‑dedup internals, `BACKEND=pytorch` fallback) live in the daemon docstring if you need them.
 
@@ -219,7 +219,7 @@ The validator blocks the add if any of these fail:
 |---|---|
 | File must be valid UTF‑8 | ≤ 1 MB |
 | Frontmatter delimiters | `---` open and close |
-| Required fields | `name`, `description` |
+| Required fields | `name`, `description`, `body` (all three are concatenated into the embedding since the full-context scheme) |
 | `name` shape | `^[a-z0-9][a-z0-9-]{1,63}$` (kebab‑case, 2–64 chars) |
 | `description` length | 20 – 500 chars |
 | `body` length | ≥ 100 chars (warning if > 50 KB) |
@@ -243,7 +243,7 @@ cache/
 └── user_skill_metadata.jsonl     ← user pool
 ```
 
-The daemon concatenates both at load time and treats them uniformly for retrieval. Upgrading the system index (re-running `install.sh`, or downloading a new version of `youngryankim/superskillret-index`) leaves your user pool untouched.
+The daemon concatenates both at load time and treats them uniformly for retrieval. Upgrading the system index (re-running `install.sh`, or downloading a new version of `ThakiCloud/superskillret-index`) leaves your user pool untouched.
 
 ### Hot reload — no restart needed
 
@@ -292,7 +292,7 @@ superskillret/
 
 ## Retrieval pipeline internals
 
-1. Each skill's `(name | description)` is encoded at build time with the SKILLRET model; embeddings are L2‑normalized.
+1. Each skill's `(name | description | body)` is encoded at build time with the SKILLRET model (full-context scheme; earlier index versions used `name | description` only); embeddings are L2‑normalized. `/superskillret:add` uses the same `name | description | body` scheme at runtime so user-pool vectors land in the same space as the published system pool.
 2. The **published** embedding index is `skill_embeddings.npy` (FP16, 34 MB), built once with the FP32 PyTorch encoder for maximum retrieval quality and then cast to float16 for disk economy. The daemon will preferentially load INT8‑quantized variants (`skill_embeddings_int8.npy` + per‑vector `skill_embeddings_scale.npy`, ~17 MB + 67 KB; 75 % smaller, reconstruction error mean 2e‑4 / max 8e‑4) if you produce them locally via `scripts/quantize_onnx.py`. INT8 quantization is opt‑in — the HF dataset only ships the FP16 copy.
 3. At query time the daemon encodes `"Instruct: Given a skill search query, retrieve relevant skills that match the query\nQuery: <user prompt>"` (the query‑side prompt SKILLRET was trained with) and ranks skills by inner product.
 4. Hits below `MIN_SCORE` are dropped so off‑topic prompts (small talk, meta questions) emit an empty `additionalContext` and cost zero extra tokens.
@@ -360,7 +360,7 @@ Bump the index:
 ```bash
 # bump cache/VERSION first, then:
 python scripts/build_index.py
-HF_TOKEN=... python scripts/publish_index.py --repo youngryankim/superskillret-index
+HF_TOKEN=... python scripts/publish_index.py --repo ThakiCloud/superskillret-index
 ```
 
 Refresh the ONNX encoder:
@@ -368,7 +368,7 @@ Refresh the ONNX encoder:
 ```bash
 optimum-cli export onnx --model ThakiCloud/SkillRet-Embedding-0.6B ./onnx_model
 python scripts/quantize_onnx.py --src onnx_model --dst onnx_model_int8
-# then upload onnx_model_int8/ to youngryankim/superskillret-onnx-int8 via the HF web UI or hf upload
+# then upload onnx_model_int8/ to ThakiCloud/superskillret-onnx-int8 via the HF web UI or hf upload
 ```
 
 ## License
