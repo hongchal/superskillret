@@ -1,7 +1,7 @@
 {
   "name": "superskillret",
-  "version": "0.3.1",
-  "description": "Embedding-based skill retrieval for Claude Code. On every user prompt, picks the top-K relevant skills from a 16,783-skill pool and injects them as context. v0.3.1: /superskillret:setup brings the plugin to a fully-ready state synchronously (install.sh + daemon spawn + verification) with live progress, so you don't waste 1-2 prompts on the lazy-fork wait notices. v0.3.0 PLUGIN_ROOT uses CLAUDE_PLUGIN_ROOT first with clear fallback. v0.2.9 Python 3.9 compat. v0.2.8 daemon health line + list/remove cli. v0.2.0–0.2.7 custom skill registration + UX fixes.",
+  "version": "0.3.2",
+  "description": "Embedding-based skill retrieval for Claude Code. On every user prompt, picks the top-K relevant skills from a 16,783-skill pool and injects them as context. v0.3.2 adds SUPERSKILLRET_SCOPE env var to restrict retrieval to the user pool (or system pool) — set \"SUPERSKILLRET_SCOPE\": \"user\" in a project's .claude/settings.json env block to retrieve only from your /superskillret:add curated set. v0.3.1: /superskillret:setup brings the plugin to a fully-ready state synchronously (install.sh + daemon spawn + verification) with live progress, so you don't waste 1-2 prompts on the lazy-fork wait notices. v0.3.0 PLUGIN_ROOT uses CLAUDE_PLUGIN_ROOT first with clear fallback. v0.2.9 Python 3.9 compat. v0.2.8 daemon health line + list/remove cli. v0.2.0–0.2.7 custom skill registration + UX fixes.",
   "author": {
     "name": "lotusroot-kim",
     "url": "https://github.com/lotusroot-kim"
